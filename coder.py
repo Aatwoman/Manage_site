@@ -1,7 +1,19 @@
 """
-Construction Site Planner — Streamlit App
-Manages building placement, site boundary, safety clearances, and space utilisation.
+Construction Site Planner  ·  v2.0
+─────────────────────────────────────────────────────────────────────────────
+Features:
+  • Shapes  – Rectangle, L-Shape, T-Shape, Hexagon, Circle, Semicircle,
+               Road (polyline + width), Custom Polygon
+  • Boundary editor – drag vertices directly on the Plotly canvas;
+                      free-draw curved outline via freehand SVG tool
+  • Safety clearance + boundary setback (configurable)
+  • Snap-to-grid, rotation per structure
+  • Space-utilisation panel
+  • JSON export / import
+─────────────────────────────────────────────────────────────────────────────
 """
+
+from __future__ import annotations
 
 import json
 import math
@@ -12,13 +24,14 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
-from shapely.affinity import rotate, translate
-from shapely.geometry import MultiPolygon, Point, Polygon
+import streamlit.components.v1 as components
+from shapely.affinity import rotate as sh_rotate
+from shapely.geometry import LineString, Point, Polygon
 from shapely.ops import unary_union
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # PAGE CONFIG
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Site Planner",
     page_icon="🏗️",
@@ -26,668 +39,1101 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ─────────────────────────────────────────────
-# CONSTANTS & COLOUR PALETTE
-# ─────────────────────────────────────────────
-CATEGORY_COLORS = {
-    "Office / Admin": "#4A90D9",
-    "Warehouse": "#E07B39",
-    "Workshop / Lab": "#6BBF59",
-    "Storage Yard": "#9B59B6",
-    "Utility / Plant Room": "#F1C40F",
-    "Access Road": "#95A5A6",
-    "Green / Landscape": "#27AE60",
-    "Custom": "#E74C3C",
+# ─────────────────────────────────────────────────────────────
+# CONSTANTS
+# ─────────────────────────────────────────────────────────────
+CATEGORY_COLORS: dict[str, str] = {
+    "Office / Admin":     "#4A90D9",
+    "Warehouse":          "#E07B39",
+    "Workshop / Lab":     "#6BBF59",
+    "Storage Yard":       "#9B59B6",
+    "Utility / Plant":    "#F1C40F",
+    "Access Road":        "#7F8C8D",
+    "Green / Landscape":  "#27AE60",
+    "Custom":             "#E74C3C",
 }
 
-SHAPE_TYPES = ["Rectangle", "L-Shape", "T-Shape", "Hexagon", "Custom Polygon"]
+SHAPE_TYPES = [
+    "Rectangle", "L-Shape", "T-Shape",
+    "Hexagon", "Circle", "Semicircle",
+    "Road", "Custom Polygon",
+]
 
-DEFAULT_SITE_BOUNDARY = [(0, 0), (100, 0), (100, 80), (60, 80), (60, 60), (0, 60)]
+DEFAULT_BOUNDARY: list[tuple[float, float]] = [
+    (0, 0), (100, 0), (110, 35), (100, 80), (55, 85), (0, 60),
+]
+
+CIRCLE_SEGMENTS = 72   # polygon approximation resolution
 
 
-# ─────────────────────────────────────────────
-# SESSION STATE BOOTSTRAP
-# ─────────────────────────────────────────────
-def init_state():
-    defaults = {
-        "buildings": {},           # id -> dict
-        "site_vertices": list(DEFAULT_SITE_BOUNDARY),
-        "safety_margin": 2.0,      # minimum gap between structures (m)
-        "boundary_threshold": 1.5, # minimum gap to site edge (m)
-        "selected_id": None,
-        "edit_mode": "view",       # view | add | edit_building | edit_boundary
-        "show_safety_zones": True,
-        "show_utilisation": True,
-        "snap_grid": 1.0,
+# ─────────────────────────────────────────────────────────────
+# SESSION-STATE BOOTSTRAP
+# ─────────────────────────────────────────────────────────────
+def _init() -> None:
+    defaults: dict = {
+        "buildings":           {},
+        "site_vertices":       list(DEFAULT_BOUNDARY),
+        "safety_margin":       2.0,
+        "boundary_threshold":  1.5,
+        "selected_id":         None,
+        "edit_mode":           "view",
+        "show_safety_zones":   True,
+        "show_utilisation":    True,
+        "snap_grid":           1.0,
+        # boundary-editor state
+        "bnd_drag_result":     None,   # JSON string pushed back from JS
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
 
-init_state()
+_init()
 
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # GEOMETRY HELPERS
-# ─────────────────────────────────────────────
-def make_rectangle(x, y, w, h, angle=0.0) -> Polygon:
-    rect = Polygon([(x, y), (x + w, y), (x + w, y + h), (x, y + h)])
-    return rotate(rect, angle, origin=(x + w / 2, y + h / 2))
-
-
-def make_l_shape(x, y, w, h, stem_w, stem_h, angle=0.0) -> Polygon:
-    pts = [
-        (x, y), (x + w, y), (x + w, y + stem_h),
-        (x + stem_w, y + stem_h), (x + stem_w, y + h), (x, y + h),
+# ─────────────────────────────────────────────────────────────
+def _circle_pts(cx: float, cy: float, r: float, n: int = CIRCLE_SEGMENTS
+                ) -> list[tuple[float, float]]:
+    return [
+        (cx + r * math.cos(2 * math.pi * i / n),
+         cy + r * math.sin(2 * math.pi * i / n))
+        for i in range(n)
     ]
-    poly = Polygon(pts)
-    return rotate(poly, angle, origin=(x + w / 2, y + h / 2))
+
+
+def make_rectangle(x, y, w, h, angle=0.0) -> Polygon:
+    p = Polygon([(x, y), (x+w, y), (x+w, y+h), (x, y+h)])
+    return sh_rotate(p, angle, origin=(x+w/2, y+h/2))
+
+
+def make_l_shape(x, y, w, h, sw, sh_, angle=0.0) -> Polygon:
+    p = Polygon([
+        (x, y), (x+w, y), (x+w, y+sh_),
+        (x+sw, y+sh_), (x+sw, y+h), (x, y+h),
+    ])
+    return sh_rotate(p, angle, origin=(x+w/2, y+h/2))
 
 
 def make_t_shape(x, y, w, h, cap_h, angle=0.0) -> Polygon:
-    stem_w = w / 3
-    stem_x = x + w / 3
-    pts = [
-        (x, y + cap_h), (x + w, y + cap_h), (x + w, y),
-        (x, y),
-        # back up into stem
-        (x, y + cap_h), (stem_x, y + cap_h),
-        (stem_x, y + h), (stem_x + stem_w, y + h),
-        (stem_x + stem_w, y + cap_h), (x + w, y + cap_h),
-    ]
-    # simpler: compose from two rectangles
-    top = Polygon([(x, y), (x + w, y), (x + w, y + cap_h), (x, y + cap_h)])
-    stem = Polygon([
-        (stem_x, y + cap_h), (stem_x + stem_w, y + cap_h),
-        (stem_x + stem_w, y + h), (stem_x, y + h),
-    ])
-    poly = top.union(stem)
-    return rotate(poly, angle, origin=(x + w / 2, y + h / 2))
+    sw = w / 3
+    sx = x + w / 3
+    top  = Polygon([(x, y),   (x+w, y),   (x+w, y+cap_h), (x,   y+cap_h)])
+    stem = Polygon([(sx, y+cap_h), (sx+sw, y+cap_h),
+                    (sx+sw, y+h),  (sx,    y+h)])
+    return sh_rotate(top.union(stem), angle, origin=(x+w/2, y+h/2))
 
 
-def make_hexagon(cx, cy, radius, angle=0.0) -> Polygon:
+def make_hexagon(cx, cy, r, angle=0.0) -> Polygon:
     pts = [
-        (cx + radius * math.cos(math.radians(60 * i)),
-         cy + radius * math.sin(math.radians(60 * i)))
+        (cx + r * math.cos(math.radians(60*i)),
+         cy + r * math.sin(math.radians(60*i)))
         for i in range(6)
     ]
-    poly = Polygon(pts)
-    return rotate(poly, angle, origin=(cx, cy))
+    return sh_rotate(Polygon(pts), angle, origin=(cx, cy))
+
+
+def make_circle(cx, cy, r) -> Polygon:
+    return Polygon(_circle_pts(cx, cy, r))
+
+
+def make_semicircle(cx, cy, r, flat_angle=0.0, angle=0.0) -> Polygon:
+    """Flat edge at `flat_angle` degrees (0 = flat on bottom, facing up)."""
+    n = CIRCLE_SEGMENTS // 2
+    pts = [(cx, cy)]
+    for i in range(n + 1):
+        a = math.radians(flat_angle) + math.pi * i / n
+        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
+    p = Polygon(pts)
+    return sh_rotate(p, angle, origin=(cx, cy))
+
+
+def make_road(waypoints: list[tuple[float, float]], width: float) -> Polygon:
+    """Buffered polyline — flat end-caps."""
+    if len(waypoints) < 2:
+        return Polygon()
+    ls = LineString(waypoints)
+    buf = ls.buffer(width / 2, cap_style=2, join_style=2)
+    return buf if buf.geom_type == "Polygon" else buf.convex_hull
 
 
 def building_polygon(b: dict) -> Polygon:
-    """Reconstruct a Shapely polygon from a building dict."""
     s = b["shape"]
-    x, y, angle = b["x"], b["y"], b.get("angle", 0.0)
+    x, y = float(b.get("x", 0)), float(b.get("y", 0))
+    angle = float(b.get("angle", 0))
 
-    if s == "Rectangle":
-        return make_rectangle(x, y, b["width"], b["height"], angle)
-    elif s == "L-Shape":
-        return make_l_shape(x, y, b["width"], b["height"],
-                            b.get("stem_w", b["width"] / 2),
-                            b.get("stem_h", b["height"] / 2), angle)
-    elif s == "T-Shape":
-        return make_t_shape(x, y, b["width"], b["height"],
-                            b.get("cap_h", b["height"] / 3), angle)
-    elif s == "Hexagon":
-        return make_hexagon(x + b["radius"], y + b["radius"], b["radius"], angle)
-    elif s == "Custom Polygon":
-        if len(b.get("custom_pts", [])) >= 3:
-            return rotate(Polygon(b["custom_pts"]), angle,
-                          origin=Polygon(b["custom_pts"]).centroid)
-        return Polygon()
+    try:
+        if s == "Rectangle":
+            return make_rectangle(x, y, b["width"], b["height"], angle)
+        if s == "L-Shape":
+            return make_l_shape(x, y, b["width"], b["height"],
+                                b.get("stem_w", b["width"]/2),
+                                b.get("stem_h", b["height"]/2), angle)
+        if s == "T-Shape":
+            return make_t_shape(x, y, b["width"], b["height"],
+                                b.get("cap_h", b["height"]/3), angle)
+        if s == "Hexagon":
+            return make_hexagon(x, y, b["radius"], angle)
+        if s == "Circle":
+            return make_circle(x, y, b["radius"])
+        if s == "Semicircle":
+            return make_semicircle(x, y, b["radius"],
+                                   b.get("flat_angle", 0), angle)
+        if s == "Road":
+            wp = [tuple(p) for p in b.get("waypoints", [])]
+            return make_road(wp, b.get("road_width", 5.0))
+        if s == "Custom Polygon":
+            pts = b.get("custom_pts", [])
+            if len(pts) >= 3:
+                raw = Polygon(pts)
+                return sh_rotate(raw, angle, origin=raw.centroid)
+    except Exception:
+        pass
     return Polygon()
 
 
 def site_polygon() -> Polygon:
-    verts = st.session_state.site_vertices
-    if len(verts) >= 3:
-        return Polygon(verts)
-    return Polygon()
+    v = st.session_state.site_vertices
+    return Polygon(v) if len(v) >= 3 else Polygon()
 
 
-def snap(val, grid):
-    if grid <= 0:
-        return val
-    return round(val / grid) * grid
+def snap(val: float, grid: float) -> float:
+    return round(val / grid) * grid if grid > 0 else val
 
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # VALIDATION
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 def check_collisions(target_id: str, poly: Polygon) -> list[str]:
-    """Return list of building IDs that collide with `poly` (excluding target)."""
-    margin = st.session_state.safety_margin
-    hits = []
-    for bid, b in st.session_state.buildings.items():
-        if bid == target_id:
-            continue
-        other = building_polygon(b)
-        if poly.buffer(margin / 2).intersects(other.buffer(margin / 2)):
-            hits.append(b["name"])
-    return hits
+    m = st.session_state.safety_margin
+    return [
+        b["name"]
+        for bid, b in st.session_state.buildings.items()
+        if bid != target_id
+        and not building_polygon(b).is_empty
+        and poly.buffer(m/2).intersects(building_polygon(b).buffer(m/2))
+    ]
 
 
 def check_boundary(poly: Polygon) -> bool:
-    """True if poly fits inside site with required boundary threshold."""
     site = site_polygon()
     if site.is_empty:
         return True
-    threshold = st.session_state.boundary_threshold
-    return site.buffer(-threshold).contains(poly)
+    t = st.session_state.boundary_threshold
+    inner = site.buffer(-t)
+    return (not inner.is_empty) and inner.contains(poly)
 
 
-# ─────────────────────────────────────────────
-# PLOT
-# ─────────────────────────────────────────────
-def build_figure() -> go.Figure:
+# ─────────────────────────────────────────────────────────────
+# PLOTLY FIGURE
+# ─────────────────────────────────────────────────────────────
+def _add_polygon_trace(fig: go.Figure, poly: Polygon,
+                       fill: str, line_color: str, line_width: float,
+                       name: str = "", hover: str = "",
+                       show_legend: bool = False) -> None:
+    geoms = [poly] if poly.geom_type == "Polygon" else list(poly.geoms)
+    for g in geoms:
+        xs, ys = g.exterior.xy
+        fig.add_trace(go.Scatter(
+            x=list(xs), y=list(ys), fill="toself",
+            fillcolor=fill,
+            line=dict(color=line_color, width=line_width),
+            name=name, text=hover,
+            hoverinfo="text" if hover else "skip",
+            hoverlabel=dict(bgcolor="white", font_size=12),
+            showlegend=show_legend,
+        ))
+
+
+def build_figure(boundary_edit_mode: bool = False) -> go.Figure:
     fig = go.Figure()
     site = site_polygon()
 
-    # ── Site boundary ──────────────────────────
+    # ── Site fill ──────────────────────────────────────────
     if not site.is_empty:
         sx, sy = site.exterior.xy
         fig.add_trace(go.Scatter(
             x=list(sx), y=list(sy), fill="toself",
-            fillcolor="rgba(220,230,240,0.3)",
-            line=dict(color="#2C3E50", width=2.5, dash="dash"),
-            name="Site Boundary", hoverinfo="skip",
+            fillcolor="rgba(215,228,245,0.35)",
+            line=dict(color="#2C3E50", width=2.5,
+                      dash="dash" if not boundary_edit_mode else "solid"),
+            name="Site Boundary", hoverinfo="skip", showlegend=False,
         ))
-        # Threshold inset
-        inset = site.buffer(-st.session_state.boundary_threshold)
-        if not inset.is_empty and not inset.geom_type == "Point":
-            geoms = [inset] if inset.geom_type == "Polygon" else list(inset.geoms)
+        # Setback inset
+        inner = site.buffer(-st.session_state.boundary_threshold)
+        if not inner.is_empty and inner.geom_type != "Point":
+            geoms = [inner] if inner.geom_type == "Polygon" else list(inner.geoms)
             for g in geoms:
                 ix, iy = g.exterior.xy
                 fig.add_trace(go.Scatter(
                     x=list(ix), y=list(iy),
                     line=dict(color="#E74C3C", width=1, dash="dot"),
-                    mode="lines", name="Boundary Threshold",
-                    hoverinfo="skip", showlegend=False,
+                    mode="lines", hoverinfo="skip", showlegend=False,
                 ))
 
-    # ── Buildings ─────────────────────────────
+    # ── Boundary vertex handles (drag mode) ───────────────
+    if boundary_edit_mode:
+        vx = [v[0] for v in st.session_state.site_vertices]
+        vy = [v[1] for v in st.session_state.site_vertices]
+        fig.add_trace(go.Scatter(
+            x=vx, y=vy, mode="markers+text",
+            marker=dict(size=14, color="#E74C3C",
+                        line=dict(color="white", width=2)),
+            text=[str(i) for i in range(len(vx))],
+            textposition="top center",
+            textfont=dict(size=9, color="#2C3E50"),
+            name="BoundaryHandles",
+            hovertemplate="Vertex %{text}<br>(%{x:.1f}, %{y:.1f})<extra></extra>",
+        ))
+
+    # ── Buildings ──────────────────────────────────────────
     for bid, b in st.session_state.buildings.items():
         poly = building_polygon(b)
         if poly.is_empty:
             continue
 
-        is_selected = (bid == st.session_state.selected_id)
-        color = b.get("color", "#4A90D9")
-        alpha = "cc" if is_selected else "99"
+        selected = bid == st.session_state.selected_id
+        color    = b.get("color", "#4A90D9")
+        alpha    = "dd" if selected else "99"
 
-        geoms = [poly] if poly.geom_type == "Polygon" else list(poly.geoms)
-        for g in geoms:
-            px, py = g.exterior.xy
-            fig.add_trace(go.Scatter(
-                x=list(px), y=list(py), fill="toself",
-                fillcolor=color + alpha,
-                line=dict(color=color, width=3 if is_selected else 1.5),
-                name=b["name"],
-                text=f"<b>{b['name']}</b><br>Category: {b['category']}<br>Area: {poly.area:.1f} m²",
-                hoverinfo="text",
-                hoverlabel=dict(bgcolor="white", font_size=12),
-            ))
+        hover_txt = (
+            f"<b>{b['name']}</b><br>"
+            f"Category: {b['category']}<br>"
+            f"Shape: {b['shape']}<br>"
+            f"Area: {poly.area:.1f} m²"
+        )
+        _add_polygon_trace(fig, poly,
+                           fill=color + alpha,
+                           line_color=color,
+                           line_width=3 if selected else 1.5,
+                           name=b["name"], hover=hover_txt)
 
-        # Safety buffer ring
+        # Safety buffer
         if st.session_state.show_safety_zones:
-            margin = st.session_state.safety_margin
-            buf = poly.buffer(margin)
-            bgeoms = [buf] if buf.geom_type == "Polygon" else list(buf.geoms)
-            for bg in bgeoms:
-                bx, by_ = bg.exterior.xy
-                fig.add_trace(go.Scatter(
-                    x=list(bx), y=list(by_),
-                    line=dict(color=color + "55", width=1, dash="dot"),
-                    fill="toself", fillcolor=color + "18",
-                    mode="lines", hoverinfo="skip", showlegend=False,
-                ))
+            buf = poly.buffer(st.session_state.safety_margin)
+            _add_polygon_trace(fig, buf,
+                               fill=color + "18",
+                               line_color=color + "55",
+                               line_width=1)
 
-        # Label at centroid
-        cx, cy_ = poly.centroid.x, poly.centroid.y
+        # Label
+        cx_, cy_ = poly.centroid.x, poly.centroid.y
         fig.add_trace(go.Scatter(
-            x=[cx], y=[cy_], mode="text",
+            x=[cx_], y=[cy_], mode="text",
             text=[b["name"]],
             textfont=dict(size=10, color="#1a1a1a", family="monospace"),
             hoverinfo="skip", showlegend=False,
         ))
 
-    # ── Layout ────────────────────────────────
+    # ── Layout ─────────────────────────────────────────────
     fig.update_layout(
-        plot_bgcolor="#F7F9FC",
-        paper_bgcolor="#F7F9FC",
+        plot_bgcolor="#F5F8FC",
+        paper_bgcolor="#F5F8FC",
         showlegend=False,
-        margin=dict(l=20, r=20, t=30, b=20),
-        xaxis=dict(
-            showgrid=True, gridcolor="#E0E6F0", gridwidth=1,
-            zeroline=False, scaleanchor="y", scaleratio=1,
-            title="X (metres)",
-        ),
-        yaxis=dict(
-            showgrid=True, gridcolor="#E0E6F0", gridwidth=1,
-            zeroline=False, title="Y (metres)",
-        ),
+        margin=dict(l=10, r=10, t=30, b=10),
+        xaxis=dict(showgrid=True, gridcolor="#DDE6F0", zeroline=False,
+                   scaleanchor="y", scaleratio=1, title="X (m)"),
+        yaxis=dict(showgrid=True, gridcolor="#DDE6F0", zeroline=False,
+                   title="Y (m)"),
         dragmode="pan",
-        height=620,
+        height=640,
+        clickmode="event",
     )
     return fig
 
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# DRAG-AND-DROP BOUNDARY EDITOR  (HTML component)
+# ─────────────────────────────────────────────────────────────
+BOUNDARY_EDITOR_HTML = """
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: monospace; background: #F5F8FC; }
+  #wrap { position: relative; width: 100%; }
+  canvas { display: block; cursor: crosshair; border: 2px solid #2C3E50;
+           border-radius: 6px; background: #fff; }
+  #toolbar {
+    display: flex; gap: 8px; padding: 8px;
+    flex-wrap: wrap; background: #EEF2F7;
+    border-radius: 6px; margin-bottom: 8px;
+  }
+  button {
+    padding: 5px 12px; border: none; border-radius: 4px;
+    cursor: pointer; font-size: 12px; font-family: monospace;
+  }
+  .btn-primary { background: #4A90D9; color: #fff; }
+  .btn-danger  { background: #E74C3C; color: #fff; }
+  .btn-neutral { background: #95A5A6; color: #fff; }
+  .btn-green   { background: #27AE60; color: #fff; }
+  #status { font-size: 11px; color: #555; padding: 4px 8px;
+            background: #fff; border-radius: 4px; min-width: 200px;
+            display:flex; align-items:center; }
+  #modeLabel { font-weight: bold; color: #4A90D9; margin-right: 6px; }
+  label { font-size:11px; color:#333; display:flex; align-items:center; gap:4px; }
+  input[type=range] { width:80px; }
+</style>
+</head>
+<body>
+<div id="toolbar">
+  <button class="btn-primary" onclick="setMode('move')">✋ Move vertex</button>
+  <button class="btn-primary" onclick="setMode('add')">➕ Add vertex</button>
+  <button class="btn-danger"  onclick="setMode('delete')">🗑 Delete vertex</button>
+  <button class="btn-green"   onclick="setMode('freehand')">✏️ Freehand draw</button>
+  <button class="btn-neutral" onclick="smooth()">〜 Smooth</button>
+  <button class="btn-neutral" onclick="resetDefault()">↩ Reset</button>
+  <button class="btn-danger"  onclick="clearAll()">✕ Clear</button>
+  <label>Grid: <input type="range" id="gridSlider" min="0" max="20" value="5"
+         oninput="gridSize=+this.value;draw()"> <span id="gridVal">5</span>m</label>
+  <div id="status"><span id="modeLabel">MOVE</span><span id="statusTxt">Drag a vertex to reshape the boundary</span></div>
+</div>
+<div id="wrap"><canvas id="c"></canvas></div>
+
+<script>
+// ── State ──────────────────────────────────────────────────
+const WORLD_W = 140, WORLD_H = 110;  // metres visible
+let verts = INIT_VERTS;              // injected by Python
+let mode = 'move';
+let dragging = -1;
+let freehand = false;
+let fhPoints = [];
+let gridSize = 5;
+let W, H, scale, offX, offY;
+
+// ── Canvas setup ───────────────────────────────────────────
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+
+function resize() {
+  const wrap = document.getElementById('wrap');
+  W = wrap.clientWidth;
+  H = Math.round(W * WORLD_H / WORLD_W);
+  canvas.width  = W;
+  canvas.height = H;
+  scale = W / WORLD_W;
+  offX  = 0; offY = 0;
+  document.getElementById('gridSlider').oninput();
+  draw();
+}
+
+window.addEventListener('resize', resize);
+resize();
+
+// ── Coordinate helpers ─────────────────────────────────────
+function toCanvas(wx, wy) {
+  return [wx * scale, H - wy * scale];
+}
+function toWorld(cx, cy) {
+  return [cx / scale, (H - cy) / scale];
+}
+function snapW(v) {
+  if (gridSize <= 0) return v;
+  return Math.round(v / gridSize) * gridSize;
+}
+function closestVertex(cx, cy, thresh=14) {
+  let best = -1, bd = Infinity;
+  verts.forEach(([wx, wy], i) => {
+    const [px, py] = toCanvas(wx, wy);
+    const d = Math.hypot(cx-px, cy-py);
+    if (d < bd && d < thresh) { bd = d; best = i; }
+  });
+  return best;
+}
+
+// ── Draw ───────────────────────────────────────────────────
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+
+  // grid
+  if (gridSize > 0) {
+    ctx.strokeStyle = '#DDE6F0';
+    ctx.lineWidth = 0.5;
+    for (let gx = 0; gx <= WORLD_W; gx += gridSize) {
+      const [px] = toCanvas(gx, 0);
+      ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, H); ctx.stroke();
+    }
+    for (let gy = 0; gy <= WORLD_H; gy += gridSize) {
+      const [, py] = toCanvas(0, gy);
+      ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(W, py); ctx.stroke();
+    }
+  }
+
+  // site fill
+  if (verts.length >= 3) {
+    ctx.beginPath();
+    verts.forEach(([wx, wy], i) => {
+      const [px, py] = toCanvas(wx, wy);
+      i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    });
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(74,144,217,0.12)';
+    ctx.fill();
+    ctx.strokeStyle = '#2C3E50';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([8, 4]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // freehand preview
+  if (fhPoints.length > 1) {
+    ctx.beginPath();
+    fhPoints.forEach(([wx, wy], i) => {
+      const [px, py] = toCanvas(wx, wy);
+      i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+    });
+    ctx.strokeStyle = '#E74C3C';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 3]);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // vertices
+  verts.forEach(([wx, wy], i) => {
+    const [px, py] = toCanvas(wx, wy);
+    ctx.beginPath();
+    ctx.arc(px, py, i === dragging ? 9 : 6, 0, 2*Math.PI);
+    ctx.fillStyle   = i === dragging ? '#E74C3C' : '#4A90D9';
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth   = 2;
+    ctx.fill(); ctx.stroke();
+    // index label
+    ctx.fillStyle = '#2C3E50';
+    ctx.font = '10px monospace';
+    ctx.fillText(i, px+8, py-6);
+  });
+
+  // axis labels
+  ctx.fillStyle = '#999'; ctx.font = '10px monospace';
+  for (let gx = 0; gx <= WORLD_W; gx += gridSize*2) {
+    const [px] = toCanvas(gx, 0);
+    ctx.fillText(gx, px+2, H-4);
+  }
+  for (let gy = 0; gy <= WORLD_H; gy += gridSize*2) {
+    const [, py] = toCanvas(0, gy);
+    ctx.fillText(gy, 2, py-2);
+  }
+}
+
+// ── Mode ───────────────────────────────────────────────────
+const modeMsg = {
+  move:     'Drag a vertex to reshape the boundary',
+  add:      'Click anywhere on the canvas to add a vertex',
+  delete:   'Click a vertex to remove it',
+  freehand: 'Click and drag to draw a freehand outline — release to finish',
+};
+function setMode(m) {
+  mode = m;
+  freehand = false; fhPoints = [];
+  document.getElementById('modeLabel').textContent = m.toUpperCase();
+  document.getElementById('statusTxt').textContent  = modeMsg[m];
+  draw();
+}
+
+// ── Smoothing (Chaikin) ────────────────────────────────────
+function smooth() {
+  if (verts.length < 4) return;
+  const out = [];
+  const n = verts.length;
+  for (let i = 0; i < n; i++) {
+    const [x0,y0] = verts[i], [x1,y1] = verts[(i+1)%n];
+    out.push([0.75*x0+0.25*x1, 0.75*y0+0.25*y1]);
+    out.push([0.25*x0+0.75*x1, 0.25*y0+0.75*y1]);
+  }
+  verts = out;
+  push();
+}
+
+function clearAll()    { verts = []; push(); }
+function resetDefault(){ verts = DEFAULT_VERTS.map(v=>[...v]); push(); }
+
+// ── Push to Streamlit ──────────────────────────────────────
+function push() {
+  draw();
+  window.parent.postMessage(
+    { type: 'boundary_update', verts: verts },
+    '*'
+  );
+}
+
+// ── Mouse events ───────────────────────────────────────────
+function getPos(e) {
+  const r = canvas.getBoundingClientRect();
+  return [e.clientX - r.left, e.clientY - r.top];
+}
+
+canvas.addEventListener('mousedown', e => {
+  const [cx, cy] = getPos(e);
+  const [wx, wy] = toWorld(cx, cy);
+
+  if (mode === 'move') {
+    dragging = closestVertex(cx, cy);
+  } else if (mode === 'add') {
+    // Insert after nearest edge
+    const sx = snapW(wx), sy = snapW(wy);
+    if (verts.length < 2) { verts.push([sx, sy]); push(); return; }
+    let best = 0, bd = Infinity;
+    for (let i = 0; i < verts.length; i++) {
+      const [ax,ay] = verts[i], [bx,by] = verts[(i+1)%verts.length];
+      const mx=(ax+bx)/2, my=(ay+by)/2;
+      const d = Math.hypot(sx-mx, sy-my);
+      if (d < bd) { bd=d; best=i; }
+    }
+    verts.splice(best+1, 0, [sx, sy]);
+    push();
+  } else if (mode === 'delete') {
+    const idx = closestVertex(cx, cy);
+    if (idx >= 0 && verts.length > 3) { verts.splice(idx,1); push(); }
+  } else if (mode === 'freehand') {
+    freehand = true; fhPoints = [[wx, wy]];
+  }
+});
+
+canvas.addEventListener('mousemove', e => {
+  const [cx, cy] = getPos(e);
+  const [wx, wy] = toWorld(cx, cy);
+
+  if (mode === 'move' && dragging >= 0) {
+    verts[dragging] = [snapW(wx), snapW(wy)];
+    draw();
+  } else if (mode === 'freehand' && freehand) {
+    fhPoints.push([wx, wy]);
+    draw();
+  }
+});
+
+canvas.addEventListener('mouseup', e => {
+  if (mode === 'move' && dragging >= 0) {
+    dragging = -1; push();
+  } else if (mode === 'freehand' && freehand) {
+    freehand = false;
+    if (fhPoints.length > 4) {
+      // Decimate to ~40 points
+      const step = Math.max(1, Math.floor(fhPoints.length / 40));
+      verts = fhPoints.filter((_,i) => i % step === 0);
+    }
+    fhPoints = [];
+    push();
+  }
+});
+
+// Touch support
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  canvas.dispatchEvent(new MouseEvent('mousedown', {clientX:t.clientX, clientY:t.clientY}));
+}, {passive:false});
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  canvas.dispatchEvent(new MouseEvent('mousemove', {clientX:t.clientX, clientY:t.clientY}));
+}, {passive:false});
+canvas.addEventListener('touchend', e => {
+  canvas.dispatchEvent(new MouseEvent('mouseup', {}));
+}, {passive:false});
+
+// Grid slider label
+document.getElementById('gridSlider').oninput = function() {
+  gridSize = +this.value;
+  document.getElementById('gridVal').textContent = gridSize;
+  draw();
+};
+</script>
+</body>
+</html>
+"""
+
+
+def _inject_boundary_editor() -> str:
+    """Return the HTML with current vertices injected."""
+    verts_js = json.dumps(st.session_state.site_vertices)
+    html = BOUNDARY_EDITOR_HTML.replace("INIT_VERTS", verts_js)
+    html = html.replace("DEFAULT_VERTS", verts_js)
+    return html
+
+
+# ─────────────────────────────────────────────────────────────
 # UTILISATION STATS
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 def utilisation_stats() -> dict:
     site = site_polygon()
-    site_area = site.area if not site.is_empty else 0
+    site_area = site.area if not site.is_empty else 0.0
 
-    polys = []
-    for b in st.session_state.buildings.values():
-        p = building_polygon(b)
-        if not p.is_empty:
-            polys.append(p)
+    polys = [building_polygon(b) for b in st.session_state.buildings.values()]
+    polys = [p for p in polys if not p.is_empty]
+    union = unary_union(polys) if polys else Polygon()
 
-    built_union = unary_union(polys) if polys else Polygon()
-    built_area = built_union.area
-
-    # Area inside site
-    inside = built_union.intersection(site).area if not site.is_empty else built_area
+    inside = union.intersection(site).area if not site.is_empty else union.area
 
     return {
-        "site_area": site_area,
-        "built_area": built_area,
-        "inside_area": inside,
-        "utilisation_pct": (inside / site_area * 100) if site_area > 0 else 0,
-        "free_area": max(0, site_area - inside),
-        "n_buildings": len(st.session_state.buildings),
+        "site_area":       site_area,
+        "inside_area":     inside,
+        "free_area":       max(0.0, site_area - inside),
+        "utilisation_pct": (inside / site_area * 100) if site_area > 0 else 0.0,
+        "n_buildings":     len(st.session_state.buildings),
     }
 
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # IMPORT / EXPORT
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 def export_state() -> str:
-    payload = {
-        "site_vertices": st.session_state.site_vertices,
-        "safety_margin": st.session_state.safety_margin,
+    return json.dumps({
+        "site_vertices":      st.session_state.site_vertices,
+        "safety_margin":      st.session_state.safety_margin,
         "boundary_threshold": st.session_state.boundary_threshold,
-        "buildings": st.session_state.buildings,
-    }
-    return json.dumps(payload, indent=2)
+        "buildings":          st.session_state.buildings,
+    }, indent=2)
 
 
-def import_state(raw: str):
+def import_state(raw: str) -> None:
     data = json.loads(raw)
-    st.session_state.site_vertices = [tuple(v) for v in data.get("site_vertices", DEFAULT_SITE_BOUNDARY)]
-    st.session_state.safety_margin = data.get("safety_margin", 2.0)
+    st.session_state.site_vertices      = [tuple(v) for v in data.get("site_vertices", DEFAULT_BOUNDARY)]
+    st.session_state.safety_margin      = data.get("safety_margin", 2.0)
     st.session_state.boundary_threshold = data.get("boundary_threshold", 1.5)
-    st.session_state.buildings = data.get("buildings", {})
+    st.session_state.buildings          = data.get("buildings", {})
 
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # SIDEBAR
-# ─────────────────────────────────────────────
-def render_sidebar():
+# ─────────────────────────────────────────────────────────────
+def render_sidebar() -> None:
     st.sidebar.title("🏗️ Site Planner")
-    st.sidebar.caption("Construction Layout Tool")
+    st.sidebar.caption("v2.0 · Construction Layout Tool")
     st.sidebar.divider()
 
-    # ── Safety parameters ─────────────────────
     st.sidebar.subheader("🛡️ Safety Parameters")
     st.session_state.safety_margin = st.sidebar.slider(
-        "Safety clearance between structures (m)",
-        min_value=0.0, max_value=10.0,
-        value=st.session_state.safety_margin, step=0.5,
-    )
+        "Clearance between structures (m)", 0.0, 10.0,
+        st.session_state.safety_margin, 0.5)
     st.session_state.boundary_threshold = st.sidebar.slider(
-        "Boundary setback (m)",
-        min_value=0.0, max_value=15.0,
-        value=st.session_state.boundary_threshold, step=0.5,
-    )
+        "Boundary setback (m)", 0.0, 15.0,
+        st.session_state.boundary_threshold, 0.5)
     st.session_state.snap_grid = st.sidebar.select_slider(
-        "Snap-to-grid (m)", options=[0.0, 0.5, 1.0, 2.0, 5.0],
-        value=st.session_state.snap_grid,
-    )
+        "Snap-to-grid (m)", [0.0, 0.5, 1.0, 2.0, 5.0],
+        st.session_state.snap_grid)
     st.sidebar.divider()
 
-    # ── View toggles ─────────────────────────
     st.sidebar.subheader("👁️ Display")
     st.session_state.show_safety_zones = st.sidebar.toggle(
-        "Show safety buffer zones", value=st.session_state.show_safety_zones
-    )
+        "Safety buffer zones", st.session_state.show_safety_zones)
     st.session_state.show_utilisation = st.sidebar.toggle(
-        "Show utilisation panel", value=st.session_state.show_utilisation
-    )
+        "Utilisation panel", st.session_state.show_utilisation)
     st.sidebar.divider()
 
-    # ── Import / Export ───────────────────────
     st.sidebar.subheader("💾 Save / Load")
-    if st.sidebar.button("📥 Export layout (JSON)", use_container_width=True):
-        st.sidebar.download_button(
-            "Download layout.json",
-            data=export_state(),
-            file_name="site_layout.json",
-            mime="application/json",
-            use_container_width=True,
-        )
-
-    uploaded = st.sidebar.file_uploader("Import layout JSON", type="json", label_visibility="collapsed")
-    if uploaded:
+    st.sidebar.download_button(
+        "📥 Export layout JSON", data=export_state(),
+        file_name="site_layout.json", mime="application/json",
+        use_container_width=True)
+    up = st.sidebar.file_uploader("Import JSON", type="json",
+                                   label_visibility="collapsed")
+    if up:
         try:
-            import_state(uploaded.read().decode())
+            import_state(up.read().decode())
             st.success("Layout imported.")
             st.rerun()
         except Exception as e:
             st.sidebar.error(f"Import failed: {e}")
 
     st.sidebar.divider()
-    st.sidebar.caption("v1.0 · Built with Streamlit + Shapely + Plotly")
+
+    # Stats summary
+    s = utilisation_stats()
+    st.sidebar.metric("Structures", s["n_buildings"])
+    st.sidebar.metric("Site area",  f"{s['site_area']:.0f} m²")
+    st.sidebar.metric("Utilisation", f"{s['utilisation_pct']:.1f}%")
 
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # BUILDING FORM
-# ─────────────────────────────────────────────
-def render_add_edit_form(existing_id: Optional[str] = None):
+# ─────────────────────────────────────────────────────────────
+def render_add_edit_form(existing_id: Optional[str] = None) -> None:
     is_edit = existing_id is not None
     b = st.session_state.buildings.get(existing_id, {}) if is_edit else {}
 
     st.subheader("✏️ Edit Structure" if is_edit else "➕ Add Structure")
-
     col1, col2 = st.columns(2)
+
     with col1:
-        name = st.text_input("Name", value=b.get("name", f"Building {len(st.session_state.buildings)+1}"))
-        category = st.selectbox("Category", list(CATEGORY_COLORS.keys()),
-                                index=list(CATEGORY_COLORS.keys()).index(b.get("category", "Office / Admin")))
-        color = st.color_picker("Colour", value=b.get("color", CATEGORY_COLORS[category]))
+        name     = st.text_input("Name",
+                     value=b.get("name", f"Structure {len(st.session_state.buildings)+1}"))
+        category = st.selectbox("Category", list(CATEGORY_COLORS),
+                     index=list(CATEGORY_COLORS).index(b.get("category", "Office / Admin")))
+        color    = st.color_picker("Colour",
+                     value=b.get("color", CATEGORY_COLORS[category]))
 
     with col2:
-        shape = st.selectbox("Shape", SHAPE_TYPES,
-                             index=SHAPE_TYPES.index(b.get("shape", "Rectangle")))
-        angle = st.slider("Rotation (°)", -180, 180, int(b.get("angle", 0)), step=5)
-        notes = st.text_area("Notes", value=b.get("notes", ""), height=68)
+        shape  = st.selectbox("Shape", SHAPE_TYPES,
+                    index=SHAPE_TYPES.index(b.get("shape", "Rectangle")))
+        angle  = st.slider("Rotation (°)", -180, 180, int(b.get("angle", 0)), 5)
+        notes  = st.text_area("Notes", value=b.get("notes", ""), height=68)
 
     st.divider()
-    grid = st.session_state.snap_grid
+    g = st.session_state.snap_grid
+    params: dict = {}
 
-    # ── Shape-specific parameters ─────────────
-    params = {}
+    # ── Shape params ───────────────────────────────────────
     if shape == "Rectangle":
         c1, c2, c3, c4 = st.columns(4)
-        params["x"]      = snap(c1.number_input("X origin (m)", value=float(b.get("x", 10.0)), step=grid or 1.0), grid)
-        params["y"]      = snap(c2.number_input("Y origin (m)", value=float(b.get("y", 10.0)), step=grid or 1.0), grid)
-        params["width"]  = snap(c3.number_input("Width (m)", value=float(b.get("width", 20.0)), min_value=1.0, step=grid or 1.0), grid)
-        params["height"] = snap(c4.number_input("Height (m)", value=float(b.get("height", 15.0)), min_value=1.0, step=grid or 1.0), grid)
+        params["x"]      = snap(c1.number_input("X (m)", value=float(b.get("x", 10)), step=max(g,0.1)), g)
+        params["y"]      = snap(c2.number_input("Y (m)", value=float(b.get("y", 10)), step=max(g,0.1)), g)
+        params["width"]  = snap(c3.number_input("Width (m)",  value=float(b.get("width",  20)), min_value=1.0, step=max(g,0.1)), g)
+        params["height"] = snap(c4.number_input("Height (m)", value=float(b.get("height", 15)), min_value=1.0, step=max(g,0.1)), g)
 
     elif shape == "L-Shape":
-        c1, c2, c3, c4 = st.columns(4)
-        params["x"]      = snap(c1.number_input("X", value=float(b.get("x", 10.0)), step=grid or 1.0), grid)
-        params["y"]      = snap(c2.number_input("Y", value=float(b.get("y", 10.0)), step=grid or 1.0), grid)
-        params["width"]  = snap(c3.number_input("Overall W (m)", value=float(b.get("width", 20.0)), min_value=2.0, step=grid or 1.0), grid)
-        params["height"] = snap(c4.number_input("Overall H (m)", value=float(b.get("height", 15.0)), min_value=2.0, step=grid or 1.0), grid)
-        c5, c6 = st.columns(2)
-        params["stem_w"] = snap(c5.number_input("Stem width (m)", value=float(b.get("stem_w", 10.0)), min_value=1.0, step=grid or 1.0), grid)
-        params["stem_h"] = snap(c6.number_input("Stem height (m)", value=float(b.get("stem_h", 8.0)), min_value=1.0, step=grid or 1.0), grid)
+        c1,c2,c3,c4 = st.columns(4)
+        params["x"]      = snap(c1.number_input("X",       value=float(b.get("x",10)),     step=max(g,0.1)), g)
+        params["y"]      = snap(c2.number_input("Y",       value=float(b.get("y",10)),     step=max(g,0.1)), g)
+        params["width"]  = snap(c3.number_input("Width",   value=float(b.get("width",20)), min_value=2.0, step=max(g,0.1)), g)
+        params["height"] = snap(c4.number_input("Height",  value=float(b.get("height",15)),min_value=2.0, step=max(g,0.1)), g)
+        c5,c6 = st.columns(2)
+        params["stem_w"] = snap(c5.number_input("Stem W (m)", value=float(b.get("stem_w",10)), min_value=1.0, step=max(g,0.1)), g)
+        params["stem_h"] = snap(c6.number_input("Stem H (m)", value=float(b.get("stem_h",8)),  min_value=1.0, step=max(g,0.1)), g)
 
     elif shape == "T-Shape":
-        c1, c2, c3, c4 = st.columns(4)
-        params["x"]      = snap(c1.number_input("X", value=float(b.get("x", 10.0)), step=grid or 1.0), grid)
-        params["y"]      = snap(c2.number_input("Y", value=float(b.get("y", 10.0)), step=grid or 1.0), grid)
-        params["width"]  = snap(c3.number_input("Total W (m)", value=float(b.get("width", 30.0)), min_value=3.0, step=grid or 1.0), grid)
-        params["height"] = snap(c4.number_input("Total H (m)", value=float(b.get("height", 20.0)), min_value=2.0, step=grid or 1.0), grid)
-        params["cap_h"]  = snap(st.number_input("Cap height (m)", value=float(b.get("cap_h", 8.0)), min_value=1.0, step=grid or 1.0), grid)
+        c1,c2,c3,c4 = st.columns(4)
+        params["x"]      = snap(c1.number_input("X",        value=float(b.get("x",10)),     step=max(g,0.1)), g)
+        params["y"]      = snap(c2.number_input("Y",        value=float(b.get("y",10)),     step=max(g,0.1)), g)
+        params["width"]  = snap(c3.number_input("Width",    value=float(b.get("width",30)), min_value=3.0, step=max(g,0.1)), g)
+        params["height"] = snap(c4.number_input("Height",   value=float(b.get("height",20)),min_value=2.0, step=max(g,0.1)), g)
+        params["cap_h"]  = snap(st.number_input("Cap height (m)", value=float(b.get("cap_h",8)), min_value=1.0, step=max(g,0.1)), g)
 
     elif shape == "Hexagon":
-        c1, c2, c3 = st.columns(3)
-        params["x"]      = snap(c1.number_input("Centre X (m)", value=float(b.get("x", 20.0)), step=grid or 1.0), grid)
-        params["y"]      = snap(c2.number_input("Centre Y (m)", value=float(b.get("y", 20.0)), step=grid or 1.0), grid)
-        params["radius"] = snap(c3.number_input("Radius (m)", value=float(b.get("radius", 8.0)), min_value=1.0, step=grid or 1.0), grid)
+        c1,c2,c3 = st.columns(3)
+        params["x"]      = snap(c1.number_input("Centre X", value=float(b.get("x",20)), step=max(g,0.1)), g)
+        params["y"]      = snap(c2.number_input("Centre Y", value=float(b.get("y",20)), step=max(g,0.1)), g)
+        params["radius"] = snap(c3.number_input("Radius (m)", value=float(b.get("radius",8)), min_value=1.0, step=max(g,0.1)), g)
+
+    elif shape == "Circle":
+        c1,c2,c3 = st.columns(3)
+        params["x"]      = snap(c1.number_input("Centre X", value=float(b.get("x",20)), step=max(g,0.1)), g)
+        params["y"]      = snap(c2.number_input("Centre Y", value=float(b.get("y",20)), step=max(g,0.1)), g)
+        params["radius"] = snap(c3.number_input("Radius (m)", value=float(b.get("radius",8)), min_value=1.0, step=max(g,0.1)), g)
+        st.caption(f"Area ≈ {math.pi * b.get('radius',8)**2:.1f} m²")
+
+    elif shape == "Semicircle":
+        c1,c2,c3 = st.columns(3)
+        params["x"]          = snap(c1.number_input("Centre X",    value=float(b.get("x",20)),           step=max(g,0.1)), g)
+        params["y"]          = snap(c2.number_input("Centre Y",    value=float(b.get("y",20)),           step=max(g,0.1)), g)
+        params["radius"]     = snap(c3.number_input("Radius (m)",  value=float(b.get("radius",10)),      min_value=1.0, step=max(g,0.1)), g)
+        params["flat_angle"] = st.slider("Flat-edge direction (°)", 0, 360,
+                                          int(b.get("flat_angle", 0)), 15,
+                                          help="0° = flat on bottom, 90° = flat on left")
+
+    elif shape == "Road":
+        st.info("Enter waypoints as X,Y pairs (one per line). Minimum 2 points.")
+        default_wp = b.get("waypoints", [(10,10),(40,10),(40,40)])
+        raw_wp = st.text_area(
+            "Waypoints (X,Y per line)",
+            value="\n".join(f"{p[0]},{p[1]}" for p in default_wp),
+            height=100,
+        )
+        parsed_wp: list = []
+        for line in raw_wp.strip().splitlines():
+            try:
+                px_, py_ = line.split(",")
+                parsed_wp.append((float(px_.strip()), float(py_.strip())))
+            except ValueError:
+                pass
+        params["waypoints"]  = parsed_wp
+        params["road_width"] = st.slider("Road width (m)", 2.0, 20.0,
+                                          float(b.get("road_width", 5.0)), 0.5)
+        params["x"] = parsed_wp[0][0] if parsed_wp else 0
+        params["y"] = parsed_wp[0][1] if parsed_wp else 0
 
     elif shape == "Custom Polygon":
-        st.info("Enter comma-separated X,Y pairs — one per line. E.g.  `10,10`")
-        default_pts = b.get("custom_pts", [(10, 10), (30, 10), (30, 25), (10, 25)])
+        st.info("Enter X,Y pairs (one per line).")
+        default_pts = b.get("custom_pts", [(10,10),(30,10),(30,25),(10,25)])
         raw_pts = st.text_area(
             "Vertices (X,Y per line)",
             value="\n".join(f"{p[0]},{p[1]}" for p in default_pts),
-            height=120,
+            height=110,
         )
-        parsed = []
+        parsed_pts: list = []
         for line in raw_pts.strip().splitlines():
             try:
-                px, py = line.split(",")
-                parsed.append((float(px.strip()), float(py.strip())))
+                px_, py_ = line.split(",")
+                parsed_pts.append((float(px_.strip()), float(py_.strip())))
             except ValueError:
                 pass
-        params["custom_pts"] = parsed
-        params["x"] = parsed[0][0] if parsed else 0
-        params["y"] = parsed[0][1] if parsed else 0
+        params["custom_pts"] = parsed_pts
+        params["x"] = parsed_pts[0][0] if parsed_pts else 0
+        params["y"] = parsed_pts[0][1] if parsed_pts else 0
 
-    params["shape"]    = shape
-    params["angle"]    = float(angle)
-    params["name"]     = name
-    params["category"] = category
-    params["color"]    = color
-    params["notes"]    = notes
+    params.update(shape=shape, angle=float(angle),
+                  name=name, category=category, color=color, notes=notes)
 
-    # ── Preview ───────────────────────────────
-    preview_poly = building_polygon(params)
-    if not preview_poly.is_empty:
-        area = preview_poly.area
-        bbox = preview_poly.bounds
-        st.caption(f"Preview — Area: **{area:.1f} m²** · Bounding box: {bbox[2]-bbox[0]:.1f} × {bbox[3]-bbox[1]:.1f} m")
+    # ── Preview area ──────────────────────────────────────
+    preview = building_polygon(params)
+    if not preview.is_empty:
+        bb = preview.bounds
+        st.caption(
+            f"Area: **{preview.area:.1f} m²** · "
+            f"Bounding box: {bb[2]-bb[0]:.1f} × {bb[3]-bb[1]:.1f} m"
+        )
 
-    # ── Save ─────────────────────────────────
-    save_col, cancel_col, *_ = st.columns([1, 1, 3])
-    save_label = "💾 Save Changes" if is_edit else "➕ Place Structure"
-    if save_col.button(save_label, type="primary", use_container_width=True):
-        bid = existing_id or str(uuid.uuid4())[:8]
+    # ── Save / Cancel ────────────────────────────────────
+    sc, cc, *_ = st.columns([1, 1, 3])
+    if sc.button("💾 Save" if is_edit else "➕ Place", type="primary",
+                 use_container_width=True):
+        bid  = existing_id or str(uuid.uuid4())[:8]
         poly = building_polygon(params)
 
-        collisions = check_collisions(bid, poly)
-        in_boundary = check_boundary(poly)
+        warns = []
+        hits  = check_collisions(bid, poly)
+        if hits:
+            warns.append(f"⚠️ Clearance violated with: {', '.join(hits)}")
+        if not check_boundary(poly):
+            warns.append("⚠️ Breaches boundary setback.")
 
-        warnings = []
-        if collisions:
-            warnings.append(f"⚠️ Safety clearance violated with: {', '.join(collisions)}")
-        if not in_boundary:
-            warnings.append("⚠️ Structure breaches boundary setback.")
-
-        if warnings:
-            for w in warnings:
+        if warns and not st.session_state.get("_force"):
+            for w in warns:
                 st.warning(w)
-            if not st.session_state.get("force_place"):
-                st.session_state["force_place"] = True
-                st.info("Press **Save** again to place anyway.")
-                return
-        st.session_state.pop("force_place", None)
+            st.session_state["_force"] = True
+            st.info("Press **Save** again to override.")
+            return
+
+        st.session_state.pop("_force", None)
         st.session_state.buildings[bid] = params
-        st.session_state.selected_id = bid
-        st.session_state.edit_mode = "view"
-        st.success(f"✅ '{name}' placed." if not is_edit else f"✅ '{name}' updated.")
+        st.session_state.selected_id    = bid
+        st.session_state.edit_mode      = "view"
+        st.success(f"✅ '{name}' {'updated' if is_edit else 'placed'}.")
         st.rerun()
 
-    if cancel_col.button("Cancel", use_container_width=True):
+    if cc.button("Cancel", use_container_width=True):
         st.session_state.edit_mode = "view"
-        st.session_state.pop("force_place", None)
+        st.session_state.pop("_force", None)
         st.rerun()
 
 
-# ─────────────────────────────────────────────
-# BOUNDARY EDITOR
-# ─────────────────────────────────────────────
-def render_boundary_editor():
+# ─────────────────────────────────────────────────────────────
+# BOUNDARY EDITOR PANEL
+# ─────────────────────────────────────────────────────────────
+def render_boundary_panel() -> None:
     st.subheader("🗺️ Edit Site Boundary")
-    st.info("Define the site outline as a list of X,Y vertices. Minimum 3 points. The polygon will close automatically.")
 
-    current = st.session_state.site_vertices
-    raw = st.text_area(
-        "Vertices (X,Y per line)",
-        value="\n".join(f"{p[0]},{p[1]}" for p in current),
-        height=200,
+    tab_canvas, tab_text, tab_preset = st.tabs(
+        ["🖱️ Drag & Draw Canvas", "⌨️ Type Coordinates", "📐 Presets"]
     )
-    parsed = []
-    for line in raw.strip().splitlines():
-        try:
-            px, py = line.split(",")
-            parsed.append((float(px.strip()), float(py.strip())))
-        except ValueError:
-            pass
 
-    # Preset sites
-    st.caption("— or load a preset —")
-    presets = {
-        "L-shaped site": [(0,0),(100,0),(100,40),(60,40),(60,80),(0,80)],
-        "Rectangular site": [(0,0),(120,0),(120,80),(0,80)],
-        "Irregular site": [(0,0),(90,0),(110,30),(100,70),(50,80),(0,60)],
-        "T-shaped site": [(20,0),(80,0),(80,40),(100,40),(100,60),(80,60),(80,90),(20,90),(20,60),(0,60),(0,40),(20,40)],
-    }
-    preset_name = st.selectbox("Preset shapes", ["— none —"] + list(presets.keys()))
-    if preset_name != "— none —":
-        parsed = presets[preset_name]
+    # ── Tab 1 : interactive canvas ─────────────────────────
+    with tab_canvas:
+        st.info(
+            "**Move vertex** — drag a blue dot  ·  "
+            "**Add vertex** — click on canvas  ·  "
+            "**Freehand** — click-drag to draw a curved outline freely  ·  "
+            "**Smooth** — rounds sharp corners"
+        )
 
-    save_col, cancel_col, reset_col, _ = st.columns([1, 1, 1, 2])
-    if save_col.button("💾 Apply Boundary", type="primary"):
-        if len(parsed) < 3:
-            st.error("Need at least 3 valid points.")
-        else:
-            st.session_state.site_vertices = parsed
+        # Receive postMessage from the iframe via a hidden text input trick:
+        # We display the canvas, then read back via a text_area that JS fills.
+        # Streamlit ↔ iframe: we use st.session_state + a query-param round-trip.
+
+        html_src = _inject_boundary_editor()
+        components.html(html_src, height=560, scrolling=False)
+
+        st.divider()
+        st.caption("Paste updated vertex JSON here after editing (copy from browser console if needed), or use the text tab for direct input.")
+
+        raw_json = st.text_area(
+            "Paste vertex JSON array (optional override)",
+            value="", height=60, label_visibility="collapsed",
+            placeholder='[[0,0],[100,0],[100,80],[0,80]]',
+        )
+        if raw_json.strip():
+            try:
+                parsed = json.loads(raw_json.strip())
+                if isinstance(parsed, list) and len(parsed) >= 3:
+                    st.session_state.site_vertices = [tuple(p) for p in parsed]
+                    st.success(f"Applied {len(parsed)} vertices.")
+                    st.rerun()
+            except Exception as e:
+                st.error(f"Invalid JSON: {e}")
+
+    # ── Tab 2 : text input ────────────────────────────────
+    with tab_text:
+        raw = st.text_area(
+            "Vertices (X,Y per line)",
+            value="\n".join(f"{p[0]},{p[1]}" for p in st.session_state.site_vertices),
+            height=220,
+        )
+        parsed_text: list = []
+        for line in raw.strip().splitlines():
+            try:
+                px_, py_ = line.split(",")
+                parsed_text.append((float(px_.strip()), float(py_.strip())))
+            except ValueError:
+                pass
+        if len(parsed_text) >= 3:
+            area = Polygon(parsed_text).area
+            st.caption(f"Area: **{area:.1f} m²** · {len(parsed_text)} vertices")
+        if st.button("✅ Apply", type="primary"):
+            if len(parsed_text) < 3:
+                st.error("Need ≥ 3 valid points.")
+            else:
+                st.session_state.site_vertices = parsed_text
+                st.session_state.edit_mode = "view"
+                st.rerun()
+
+    # ── Tab 3 : presets ───────────────────────────────────
+    with tab_preset:
+        presets: dict[str, list] = {
+            "Default (irregular)": list(DEFAULT_BOUNDARY),
+            "Rectangle 120×80":   [(0,0),(120,0),(120,80),(0,80)],
+            "Large square 150×150": [(0,0),(150,0),(150,150),(0,150)],
+            "L-shaped":           [(0,0),(100,0),(100,40),(60,40),(60,80),(0,80)],
+            "T-shaped":           [(20,0),(80,0),(80,40),(100,40),(100,60),(80,60),
+                                   (80,90),(20,90),(20,60),(0,60),(0,40),(20,40)],
+            "Trapezoid":          [(10,0),(110,0),(120,80),(0,80)],
+            "Pentagon site":      [(50,0),(100,30),(85,90),(15,90),(0,30)],
+            "Oval (approx)":      [
+                (50+40*math.cos(2*math.pi*i/24),
+                 40+28*math.sin(2*math.pi*i/24))
+                for i in range(24)
+            ],
+        }
+        choice = st.selectbox("Select preset", list(presets))
+        prev   = Polygon(presets[choice])
+        st.caption(f"Area: {prev.area:.1f} m² · {len(presets[choice])} vertices")
+        if st.button("Load preset", type="primary"):
+            st.session_state.site_vertices = presets[choice]
             st.session_state.edit_mode = "view"
-            st.success("Boundary updated.")
             st.rerun()
-    if cancel_col.button("Cancel"):
+
+    sc, cc = st.columns([1, 1])
+    if cc.button("✕ Cancel", use_container_width=True):
         st.session_state.edit_mode = "view"
         st.rerun()
-    if reset_col.button("↩ Reset to default"):
-        st.session_state.site_vertices = list(DEFAULT_SITE_BOUNDARY)
-        st.session_state.edit_mode = "view"
-        st.rerun()
-
-    # Live preview
-    if len(parsed) >= 3:
-        area = Polygon(parsed).area
-        st.caption(f"Site area: **{area:.1f} m²** · {len(parsed)} vertices")
 
 
-# ─────────────────────────────────────────────
-# BUILDING TABLE
-# ─────────────────────────────────────────────
-def render_building_table():
+# ─────────────────────────────────────────────────────────────
+# STRUCTURE TABLE
+# ─────────────────────────────────────────────────────────────
+def render_table() -> None:
     if not st.session_state.buildings:
-        st.info("No structures placed yet. Click **Add Structure** to begin.")
+        st.info("No structures yet — click **➕ Add Structure** above.")
         return
 
     rows = []
     for bid, b in st.session_state.buildings.items():
         poly = building_polygon(b)
         rows.append({
-            "ID": bid,
-            "Name": b["name"],
-            "Category": b["category"],
-            "Shape": b["shape"],
-            "Area (m²)": f"{poly.area:.1f}",
-            "Angle (°)": b.get("angle", 0),
-            "Boundary ✓": "✅" if check_boundary(poly) else "⚠️",
-            "Clearance ✓": "✅" if not check_collisions(bid, poly) else "⚠️",
+            "ID":          bid,
+            "Name":        b["name"],
+            "Category":    b["category"],
+            "Shape":       b["shape"],
+            "Area (m²)":   f"{poly.area:.1f}",
+            "Rotation":    f"{b.get('angle',0):.0f}°",
+            "Boundary":    "✅" if check_boundary(poly) else "⚠️",
+            "Clearance":   "✅" if not check_collisions(bid, poly) else "⚠️",
         })
 
-    df = pd.DataFrame(rows).set_index("ID")
-    st.dataframe(df, use_container_width=True, height=220)
+    st.dataframe(pd.DataFrame(rows).set_index("ID"),
+                 use_container_width=True, height=210)
 
-    # Select / delete
-    sel_col, del_col = st.columns([3, 1])
     all_names = {b["name"]: bid for bid, b in st.session_state.buildings.items()}
-    sel_name = sel_col.selectbox("Select to edit", ["— none —"] + list(all_names.keys()), label_visibility="collapsed")
-    if sel_name != "— none —":
-        sel_id = all_names[sel_name]
-        if sel_col.button("✏️ Edit", use_container_width=False):
-            st.session_state.selected_id = sel_id
-            st.session_state.edit_mode = "edit_building"
+    sc, ec, dc = st.columns([3, 1, 1])
+    sel = sc.selectbox("Select", ["— none —"] + list(all_names),
+                        label_visibility="collapsed")
+    if sel != "— none —":
+        sid = all_names[sel]
+        if ec.button("✏️ Edit", use_container_width=True):
+            st.session_state.selected_id = sid
+            st.session_state.edit_mode   = "edit_building"
             st.rerun()
-        if del_col.button("🗑️ Delete", use_container_width=True):
-            del st.session_state.buildings[sel_id]
-            if st.session_state.selected_id == sel_id:
+        if dc.button("🗑️ Delete", use_container_width=True):
+            del st.session_state.buildings[sid]
+            if st.session_state.selected_id == sid:
                 st.session_state.selected_id = None
             st.rerun()
 
 
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 # UTILISATION PANEL
-# ─────────────────────────────────────────────
-def render_utilisation():
-    stats = utilisation_stats()
+# ─────────────────────────────────────────────────────────────
+def render_utilisation() -> None:
+    s = utilisation_stats()
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Site Area", f"{stats['site_area']:.0f} m²")
-    c2.metric("Built Area", f"{stats['inside_area']:.0f} m²")
-    c3.metric("Free Area", f"{stats['free_area']:.0f} m²")
-    c4.metric("Utilisation", f"{stats['utilisation_pct']:.1f}%")
+    c1.metric("Site Area",    f"{s['site_area']:.0f} m²")
+    c2.metric("Built Area",   f"{s['inside_area']:.0f} m²")
+    c3.metric("Free Area",    f"{s['free_area']:.0f} m²")
+    c4.metric("Utilisation",  f"{s['utilisation_pct']:.1f}%")
 
-    # Simple bar
-    pct = stats["utilisation_pct"] / 100
-    bar_html = f"""
-    <div style="background:#e0e6f0;border-radius:6px;height:12px;margin-top:4px">
-      <div style="background:{'#E07B39' if pct>0.85 else '#6BBF59'};width:{min(pct,1)*100:.1f}%;
-                  height:100%;border-radius:6px;transition:width 0.4s"></div>
-    </div>
-    <p style="font-size:0.75rem;color:#555;margin-top:4px">
-      {stats['n_buildings']} structure(s) placed
-      {'— ⚠️ Over 85% utilisation' if pct>0.85 else ''}
-    </p>
-    """
-    st.markdown(bar_html, unsafe_allow_html=True)
+    pct = min(s["utilisation_pct"] / 100, 1.0)
+    colour = "#E74C3C" if pct > 0.9 else "#E07B39" if pct > 0.75 else "#27AE60"
+    st.markdown(
+        f'<div style="background:#DDE6F0;border-radius:6px;height:10px;margin:4px 0">'
+        f'<div style="background:{colour};width:{pct*100:.1f}%;height:100%;'
+        f'border-radius:6px;transition:width .4s"></div></div>'
+        f'<p style="font-size:.75rem;color:#555;margin:2px 0">'
+        f'{s["n_buildings"]} structure(s) placed'
+        f'{"  — ⚠️ Site nearly full!" if pct > 0.9 else ""}</p>',
+        unsafe_allow_html=True,
+    )
 
 
-# ─────────────────────────────────────────────
-# MAIN LAYOUT
-# ─────────────────────────────────────────────
-def main():
+# ─────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────
+def main() -> None:
     render_sidebar()
 
-    # ── Toolbar ───────────────────────────────
-    t1, t2, t3, t4, t5 = st.columns([2, 2, 2, 2, 3])
+    # ── Toolbar ───────────────────────────────────────────
+    t1, t2, t3, t4 = st.columns([2, 2, 2, 2])
     if t1.button("➕ Add Structure", type="primary", use_container_width=True):
-        st.session_state.edit_mode = "add"
+        st.session_state.edit_mode   = "add"
         st.session_state.selected_id = None
     if t2.button("🗺️ Edit Boundary", use_container_width=True):
         st.session_state.edit_mode = "edit_boundary"
-    if t3.button("🗑️ Clear All", use_container_width=True):
-        if st.session_state.buildings:
-            st.session_state.buildings = {}
-            st.session_state.selected_id = None
-            st.rerun()
-    if t4.button("⬇️ Export JSON", use_container_width=True):
-        st.download_button(
-            "💾 Download",
-            data=export_state(),
-            file_name="site_layout.json",
-            mime="application/json",
-        )
+    if t3.button("🗑️ Clear Structures", use_container_width=True):
+        st.session_state.buildings   = {}
+        st.session_state.selected_id = None
+        st.rerun()
+    if t4.button("🔄 Reset Everything", use_container_width=True):
+        for k in ["buildings","site_vertices","selected_id","edit_mode"]:
+            del st.session_state[k]
+        st.rerun()
 
-    # ── Mode panels ───────────────────────────
+    # ── Active panel ──────────────────────────────────────
     if st.session_state.edit_mode == "add":
         render_add_edit_form()
         st.divider()
     elif st.session_state.edit_mode == "edit_building" and st.session_state.selected_id:
-        render_add_edit_form(existing_id=st.session_state.selected_id)
+        render_add_edit_form(st.session_state.selected_id)
         st.divider()
     elif st.session_state.edit_mode == "edit_boundary":
-        render_boundary_editor()
+        render_boundary_panel()
         st.divider()
 
-    # ── Utilisation banner ────────────────────
+    # ── Utilisation ───────────────────────────────────────
     if st.session_state.show_utilisation:
         render_utilisation()
         st.divider()
 
-    # ── Main canvas ───────────────────────────
-    st.plotly_chart(build_figure(), use_container_width=True, config={
-        "scrollZoom": True,
-        "displayModeBar": True,
-        "modeBarButtonsToRemove": ["lasso2d", "select2d"],
-        "toImageButtonOptions": {"format": "png", "filename": "site_layout"},
-    })
+    # ── Canvas ────────────────────────────────────────────
+    in_bnd_edit = st.session_state.edit_mode == "edit_boundary"
+    st.plotly_chart(build_figure(boundary_edit_mode=in_bnd_edit),
+                    use_container_width=True,
+                    config={
+                        "scrollZoom": True,
+                        "displayModeBar": True,
+                        "modeBarButtonsToRemove": ["lasso2d","select2d"],
+                        "toImageButtonOptions": {
+                            "format": "png",
+                            "filename": "site_layout",
+                            "scale": 2,
+                        },
+                    })
 
-    # ── Building table ────────────────────────
+    # ── Structure table ───────────────────────────────────
     st.subheader("📋 Structure List")
-    render_building_table()
+    render_table()
 
 
 if __name__ == "__main__":
