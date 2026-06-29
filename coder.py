@@ -40,6 +40,54 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────
+# GLOBAL CSS
+# ─────────────────────────────────────────────────────────────
+st.markdown("""
+<style>
+/* ── Toolbar buttons ── */
+div[data-testid="stHorizontalBlock"] button {
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    letter-spacing: .3px;
+}
+
+/* ── Dark sidebar ── */
+section[data-testid="stSidebar"] {
+    background: #1E2A38 !important;
+}
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] p,
+section[data-testid="stSidebar"] span,
+section[data-testid="stSidebar"] small {
+    color: #C5D4E3 !important;
+}
+section[data-testid="stSidebar"] h1,
+section[data-testid="stSidebar"] h2,
+section[data-testid="stSidebar"] h3 {
+    color: #FFFFFF !important;
+}
+section[data-testid="stSidebar"] [data-testid="stMetricValue"] {
+    color: #FFFFFF !important;
+    font-size: 1.3rem !important;
+}
+section[data-testid="stSidebar"] [data-testid="stMetricLabel"] {
+    color: #8BAACC !important;
+}
+
+/* ── Metric cards in main area ── */
+div[data-testid="stMetric"] {
+    background: #F0F4FA;
+    border-radius: 10px;
+    padding: 10px 14px 8px;
+    border-left: 4px solid #4A90D9;
+}
+
+/* ── Tighter top padding ── */
+.block-container { padding-top: 1rem !important; }
+</style>
+""", unsafe_allow_html=True)
+
+# ─────────────────────────────────────────────────────────────
 # CONSTANTS
 # ─────────────────────────────────────────────────────────────
 CATEGORY_COLORS: dict[str, str] = {
@@ -64,6 +112,18 @@ DEFAULT_BOUNDARY: list[tuple[float, float]] = [
 ]
 
 CIRCLE_SEGMENTS = 72   # polygon approximation resolution
+
+
+# ─────────────────────────────────────────────────────────────
+# COLOUR UTILITIES  (Plotly 6+ requires rgba() — no 8-char hex)
+# ─────────────────────────────────────────────────────────────
+def hex_to_rgba(hex_color: str, alpha: float = 1.0) -> str:
+    """Convert '#RRGGBB' + opacity float → 'rgba(r,g,b,a)' string."""
+    h = hex_color.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c*2 for c in h)
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -260,9 +320,10 @@ def build_figure(boundary_edit_mode: bool = False) -> go.Figure:
                       dash="dash" if not boundary_edit_mode else "solid"),
             name="Site Boundary", hoverinfo="skip", showlegend=False,
         ))
-        # Setback inset
+        # Setback inset — guard against threshold ≥ inradius collapsing to
+        # a LineString / Point, neither of which has .exterior
         inner = site.buffer(-st.session_state.boundary_threshold)
-        if not inner.is_empty and inner.geom_type != "Point":
+        if not inner.is_empty and inner.geom_type in ("Polygon", "MultiPolygon"):
             geoms = [inner] if inner.geom_type == "Polygon" else list(inner.geoms)
             for g in geoms:
                 ix, iy = g.exterior.xy
@@ -295,7 +356,10 @@ def build_figure(boundary_edit_mode: bool = False) -> go.Figure:
 
         selected = bid == st.session_state.selected_id
         color    = b.get("color", "#4A90D9")
-        alpha    = "dd" if selected else "99"
+        # Use rgba() — Plotly 6+ does not accept 8-char hex (#RRGGBBaa)
+        fill_alpha   = 0.87 if selected else 0.60
+        fill_rgba    = hex_to_rgba(color, fill_alpha)
+        line_width   = 3 if selected else 1.5
 
         hover_txt = (
             f"<b>{b['name']}</b><br>"
@@ -304,17 +368,17 @@ def build_figure(boundary_edit_mode: bool = False) -> go.Figure:
             f"Area: {poly.area:.1f} m²"
         )
         _add_polygon_trace(fig, poly,
-                           fill=color + alpha,
+                           fill=fill_rgba,
                            line_color=color,
-                           line_width=3 if selected else 1.5,
+                           line_width=line_width,
                            name=b["name"], hover=hover_txt)
 
         # Safety buffer
         if st.session_state.show_safety_zones:
             buf = poly.buffer(st.session_state.safety_margin)
             _add_polygon_trace(fig, buf,
-                               fill=color + "18",
-                               line_color=color + "55",
+                               fill=hex_to_rgba(color, 0.09),
+                               line_color=hex_to_rgba(color, 0.33),
                                line_width=1)
 
         # Label
@@ -703,20 +767,26 @@ def import_state(raw: str) -> None:
 # SIDEBAR
 # ─────────────────────────────────────────────────────────────
 def render_sidebar() -> None:
-    st.sidebar.title("🏗️ Site Planner")
-    st.sidebar.caption("v2.0 · Construction Layout Tool")
+    st.sidebar.markdown(
+        "<h2 style='margin-bottom:0;color:#fff'>🏗️ Site Planner</h2>"
+        "<p style='font-size:.75rem;color:#8BAACC;margin-top:2px'>v2.0 · Construction Layout Tool</p>",
+        unsafe_allow_html=True,
+    )
     st.sidebar.divider()
 
     st.sidebar.subheader("🛡️ Safety Parameters")
     st.session_state.safety_margin = st.sidebar.slider(
         "Clearance between structures (m)", 0.0, 10.0,
-        st.session_state.safety_margin, 0.5)
+        st.session_state.safety_margin, 0.5,
+        help="Minimum gap enforced between any two structures")
     st.session_state.boundary_threshold = st.sidebar.slider(
         "Boundary setback (m)", 0.0, 15.0,
-        st.session_state.boundary_threshold, 0.5)
+        st.session_state.boundary_threshold, 0.5,
+        help="Structures must be set back this far from the site boundary")
     st.session_state.snap_grid = st.sidebar.select_slider(
         "Snap-to-grid (m)", [0.0, 0.5, 1.0, 2.0, 5.0],
-        st.session_state.snap_grid)
+        st.session_state.snap_grid,
+        help="0 = free placement")
     st.sidebar.divider()
 
     st.sidebar.subheader("👁️ Display")
@@ -730,13 +800,14 @@ def render_sidebar() -> None:
     st.sidebar.download_button(
         "📥 Export layout JSON", data=export_state(),
         file_name="site_layout.json", mime="application/json",
-        use_container_width=True)
-    up = st.sidebar.file_uploader("Import JSON", type="json",
-                                   label_visibility="collapsed")
+        use_container_width=True,
+        help="Download current layout as a JSON file")
+    up = st.sidebar.file_uploader("📂 Import JSON", type="json",
+                                   label_visibility="visible")
     if up:
         try:
             import_state(up.read().decode())
-            st.success("Layout imported.")
+            st.success("Layout imported successfully.")
             st.rerun()
         except Exception as e:
             st.sidebar.error(f"Import failed: {e}")
@@ -745,9 +816,10 @@ def render_sidebar() -> None:
 
     # Stats summary
     s = utilisation_stats()
-    st.sidebar.metric("Structures", s["n_buildings"])
-    st.sidebar.metric("Site area",  f"{s['site_area']:.0f} m²")
-    st.sidebar.metric("Utilisation", f"{s['utilisation_pct']:.1f}%")
+    m1, m2, m3 = st.sidebar.columns(3)
+    m1.metric("Structures", s["n_buildings"])
+    m2.metric("Area", f"{s['site_area']:.0f}m²")
+    m3.metric("Used", f"{s['utilisation_pct']:.0f}%")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -873,10 +945,17 @@ def render_add_edit_form(existing_id: Optional[str] = None) -> None:
     preview = building_polygon(params)
     if not preview.is_empty:
         bb = preview.bounds
-        st.caption(
-            f"Area: **{preview.area:.1f} m²** · "
-            f"Bounding box: {bb[2]-bb[0]:.1f} × {bb[3]-bb[1]:.1f} m"
+        col_prev, col_bnd, col_clr = st.columns(3)
+        col_prev.caption(
+            f"**Area:** {preview.area:.1f} m²  ·  "
+            f"**Box:** {bb[2]-bb[0]:.1f} × {bb[3]-bb[1]:.1f} m"
         )
+        # Live boundary & clearance feedback
+        dummy_id = existing_id or "__preview__"
+        bnd_ok = check_boundary(preview)
+        clr_hits = check_collisions(dummy_id, preview)
+        col_bnd.caption("Boundary: " + ("✅ Inside setback" if bnd_ok else "⚠️ Breaches setback"))
+        col_clr.caption("Clearance: " + ("✅ Clear" if not clr_hits else f"⚠️ Conflicts: {', '.join(clr_hits)}"))
 
     # ── Save / Cancel ────────────────────────────────────
     sc, cc, *_ = st.columns([1, 1, 3])
@@ -1017,14 +1096,22 @@ def render_boundary_panel() -> None:
 # ─────────────────────────────────────────────────────────────
 def render_table() -> None:
     if not st.session_state.buildings:
-        st.info("No structures yet — click **➕ Add Structure** above.")
+        st.markdown(
+            "<div style='text-align:center;padding:2rem;background:#F8FAFD;"
+            "border-radius:10px;border:1.5px dashed #BDD0E5;color:#7A9BB5'>"
+            "<p style='font-size:1.5rem;margin:0'>🏗️</p>"
+            "<p style='margin:4px 0 0'>No structures yet — click <b>➕ Add Structure</b> above.</p>"
+            "</div>",
+            unsafe_allow_html=True,
+        )
         return
 
     rows = []
     for bid, b in st.session_state.buildings.items():
         poly = building_polygon(b)
+        is_selected = "⭐" if bid == st.session_state.selected_id else ""
         rows.append({
-            "ID":          bid,
+            "":            is_selected,
             "Name":        b["name"],
             "Category":    b["category"],
             "Shape":       b["shape"],
@@ -1034,20 +1121,20 @@ def render_table() -> None:
             "Clearance":   "✅" if not check_collisions(bid, poly) else "⚠️",
         })
 
-    st.dataframe(pd.DataFrame(rows).set_index("ID"),
-                 use_container_width=True, height=210)
+    st.dataframe(pd.DataFrame(rows),
+                 use_container_width=True, height=200, hide_index=True)
 
     all_names = {b["name"]: bid for bid, b in st.session_state.buildings.items()}
     sc, ec, dc = st.columns([3, 1, 1])
-    sel = sc.selectbox("Select", ["— none —"] + list(all_names),
+    sel = sc.selectbox("Select structure", ["— select —"] + list(all_names),
                         label_visibility="collapsed")
-    if sel != "— none —":
+    if sel != "— select —":
         sid = all_names[sel]
         if ec.button("✏️ Edit", use_container_width=True):
             st.session_state.selected_id = sid
             st.session_state.edit_mode   = "edit_building"
             st.rerun()
-        if dc.button("🗑️ Delete", use_container_width=True):
+        if dc.button("🗑️ Delete", use_container_width=True, type="secondary"):
             del st.session_state.buildings[sid]
             if st.session_state.selected_id == sid:
                 st.session_state.selected_id = None
@@ -1060,20 +1147,31 @@ def render_table() -> None:
 def render_utilisation() -> None:
     s = utilisation_stats()
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Site Area",    f"{s['site_area']:.0f} m²")
-    c2.metric("Built Area",   f"{s['inside_area']:.0f} m²")
-    c3.metric("Free Area",    f"{s['free_area']:.0f} m²")
-    c4.metric("Utilisation",  f"{s['utilisation_pct']:.1f}%")
+    c1.metric("Site Area",   f"{s['site_area']:.0f} m²")
+    c2.metric("Built Area",  f"{s['inside_area']:.0f} m²")
+    c3.metric("Free Area",   f"{s['free_area']:.0f} m²")
+    c4.metric("Utilisation", f"{s['utilisation_pct']:.1f}%")
 
     pct = min(s["utilisation_pct"] / 100, 1.0)
-    colour = "#E74C3C" if pct > 0.9 else "#E07B39" if pct > 0.75 else "#27AE60"
+    if pct > 0.9:
+        bar_color, status_icon, status_text = "#E74C3C", "🔴", "Site nearly full — consider expanding the boundary"
+    elif pct > 0.75:
+        bar_color, status_icon, status_text = "#E07B39", "🟡", "Getting busy — monitor clearances"
+    else:
+        bar_color, status_icon, status_text = "#27AE60", "🟢", "Plenty of space available"
+
     st.markdown(
-        f'<div style="background:#DDE6F0;border-radius:6px;height:10px;margin:4px 0">'
-        f'<div style="background:{colour};width:{pct*100:.1f}%;height:100%;'
-        f'border-radius:6px;transition:width .4s"></div></div>'
-        f'<p style="font-size:.75rem;color:#555;margin:2px 0">'
-        f'{s["n_buildings"]} structure(s) placed'
-        f'{"  — ⚠️ Site nearly full!" if pct > 0.9 else ""}</p>',
+        f"""
+        <div style="margin:6px 0 2px">
+          <div style="background:#DDE6F0;border-radius:6px;height:12px;overflow:hidden">
+            <div style="background:{bar_color};width:{pct*100:.1f}%;height:100%;
+                        border-radius:6px;transition:width .4s ease"></div>
+          </div>
+          <p style="font-size:.78rem;color:#555;margin:4px 0 0">
+            {status_icon} {s['n_buildings']} structure(s) placed &nbsp;·&nbsp; {status_text}
+          </p>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
 
@@ -1084,31 +1182,60 @@ def render_utilisation() -> None:
 def main() -> None:
     render_sidebar()
 
+    # ── Page header ───────────────────────────────────────
+    st.markdown("## 🏗️ Construction Site Planner")
+
     # ── Toolbar ───────────────────────────────────────────
-    t1, t2, t3, t4 = st.columns([2, 2, 2, 2])
+    t1, t2, t3, t4 = st.columns([3, 3, 2, 2])
     if t1.button("➕ Add Structure", type="primary", use_container_width=True):
         st.session_state.edit_mode   = "add"
         st.session_state.selected_id = None
+        st.session_state.pop("_force", None)
     if t2.button("🗺️ Edit Boundary", use_container_width=True):
         st.session_state.edit_mode = "edit_boundary"
-    if t3.button("🗑️ Clear Structures", use_container_width=True):
-        st.session_state.buildings   = {}
-        st.session_state.selected_id = None
-        st.rerun()
-    if t4.button("🔄 Reset Everything", use_container_width=True):
-        for k in ["buildings","site_vertices","selected_id","edit_mode"]:
-            del st.session_state[k]
-        st.rerun()
+
+    # Destructive actions — require a second click to confirm
+    if t3.button("🗑️ Clear All", use_container_width=True):
+        st.session_state["_confirm_clear"] = True
+    if t4.button("🔄 Reset", use_container_width=True):
+        st.session_state["_confirm_reset"] = True
+
+    if st.session_state.pop("_confirm_clear", False):
+        col_y, col_n = st.columns(2)
+        st.warning("Remove all structures from the canvas?")
+        if col_y.button("Yes, clear all", type="primary", use_container_width=True):
+            st.session_state.buildings   = {}
+            st.session_state.selected_id = None
+            st.rerun()
+        if col_n.button("Cancel", use_container_width=True):
+            st.rerun()
+
+    if st.session_state.pop("_confirm_reset", False):
+        col_y, col_n = st.columns(2)
+        st.warning("Reset everything — structures **and** boundary?")
+        if col_y.button("Yes, reset everything", type="primary", use_container_width=True):
+            for k in ["buildings", "site_vertices", "selected_id", "edit_mode"]:
+                del st.session_state[k]
+            st.rerun()
+        if col_n.button("Cancel", use_container_width=True):
+            st.rerun()
 
     # ── Active panel ──────────────────────────────────────
+    panel_open = False
     if st.session_state.edit_mode == "add":
+        st.divider()
         render_add_edit_form()
-        st.divider()
+        panel_open = True
     elif st.session_state.edit_mode == "edit_building" and st.session_state.selected_id:
-        render_add_edit_form(st.session_state.selected_id)
         st.divider()
+        render_add_edit_form(st.session_state.selected_id)
+        panel_open = True
     elif st.session_state.edit_mode == "edit_boundary":
+        st.divider()
         render_boundary_panel()
+        panel_open = True
+
+    if panel_open:
         st.divider()
 
     # ── Utilisation ───────────────────────────────────────
@@ -1123,7 +1250,7 @@ def main() -> None:
                     config={
                         "scrollZoom": True,
                         "displayModeBar": True,
-                        "modeBarButtonsToRemove": ["lasso2d","select2d"],
+                        "modeBarButtonsToRemove": ["lasso2d", "select2d"],
                         "toImageButtonOptions": {
                             "format": "png",
                             "filename": "site_layout",
@@ -1132,7 +1259,7 @@ def main() -> None:
                     })
 
     # ── Structure table ───────────────────────────────────
-    st.subheader("📋 Structure List")
+    st.subheader("📋 Structures")
     render_table()
 
 
