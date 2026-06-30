@@ -1,5 +1,5 @@
 """
-Construction Site Planner  ·  v7.5 (Stable Shadow DOM Initialization)
+Construction Site Planner  ·  v8.0 (Exact Dimension Inputs)
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -41,7 +41,7 @@ _CANVAS_HTML = """
       <input type="number" id="boundarySides" min="3" max="20" step="1" style="width:54px" />
     </div>
   </div>
-  <div class="hint">💡 <b>Pan:</b> Drag canvas background &middot; <b>Zoom:</b> Scroll wheel &middot; <b>Modify:</b> Select a shape to rotate or resize symmetrically. (Max Area: 100,000 m²)</div>
+  <div class="hint">💡 <b>Pan:</b> Drag canvas background &middot; <b>Zoom:</b> Scroll wheel &middot; <b>Precision:</b> Use the side panel to type exact dimensions!</div>
 
   <div id="main">
     <div id="canvasWrap">
@@ -90,7 +90,7 @@ _CANVAS_CSS = """
   svg#canvas { width: 100%; height: 100%; display: block; touch-action: none; background: #FAFBFC; }
 
   #side {
-    flex: 0 0 280px; max-width: 280px; height: 100%;
+    flex: 0 0 310px; max-width: 310px; height: 100%;
     border: 1px solid #D4DFEA; border-radius: 10px; background: #fff; padding: 12px;
     overflow-y: auto; display: flex; flex-direction: column;
   }
@@ -119,7 +119,13 @@ _CANVAS_CSS = """
   .icon-btn.del { background: #FCEAEA; color: #C0392B; }
   .icon-btn.del:hover { background: #FAD4D4; }
 
-  .bld-row .meta { font-size: 11px; color: #8094A8; margin-bottom: 2px; padding-left: 2px; }
+  .bld-row .meta { font-size: 11px; color: #8094A8; margin-bottom: 4px; padding-left: 2px; }
+  
+  .dims-row { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #4A5A6A; margin-top: 4px; }
+  .dims-row input[type="number"] { width: 48px; padding: 3px 4px; font-size: 11.5px; border: 1px solid #C7D4E2; border-radius: 4px; text-align: center; }
+  .dims-row input[type="number"]:focus { outline: none; border-color: #4A90D9; }
+  .dims-row .unit { color: #8094A8; margin-right: 4px; font-size: 10px; }
+
   .empty-list { font-size: 13px; color: #95A5B5; text-align: center; padding: 30px 4px; }
   .warn-badge { color: #E74C3C; font-weight: 600; }
 """
@@ -143,7 +149,7 @@ svg.dataset.initialized = "true";
 // STATE & INFINITE CANVAS VIEWPORT CONFIG
 // ─────────────────────────────────────────────────────────────
 const WORLD_W = 200, WORLD_H = 130;
-const MIN_SIZE = 4;
+const MIN_SIZE = 1; // Lowered to 1m so precise inputs don't snap incorrectly
 const MAX_AREA = 100000;
 let SNAP = 1;
 
@@ -423,10 +429,44 @@ function renderSidePanel() {
     });
     
     top.appendChild(cp); top.appendChild(ni); top.appendChild(dupBtn); top.appendChild(delBtn);
+    
     const meta = document.createElement("div"); meta.className = "meta";
-    meta.innerHTML = `${BUILDING_SHAPES[b.shape].label} &middot; ${b.r||0}&deg; rotation` + 
+    meta.innerHTML = `<b>${BUILDING_SHAPES[b.shape].label}</b>` + 
       (inside ? "" : ' &middot; <span class="warn-badge">outside boundary</span>');
-    row.appendChild(top); row.appendChild(meta); bldListEl.appendChild(row);
+    
+    // Exact Dimension Controls
+    const dimsRow = document.createElement("div"); dimsRow.className = "dims-row";
+    let dimHTML = "";
+    if (b.shape === "circle") {
+      dimHTML = `<span title="Diameter">Ø:</span><input type="number" data-prop="w" value="${Math.round(b.w)}" min="1" step="1"><span class="unit">m</span>`;
+    } else {
+      dimHTML = `<span title="Width">W:</span><input type="number" data-prop="w" value="${Math.round(b.w)}" min="1" step="1">
+                 <span title="Height" style="margin-left:2px;">H:</span><input type="number" data-prop="h" value="${Math.round(b.h)}" min="1" step="1"><span class="unit">m</span>`;
+    }
+    dimHTML += `<span title="Rotation" style="margin-left:8px;">R:</span><input type="number" data-prop="r" value="${b.r || 0}" step="1" style="width:44px"><span class="unit">&deg;</span>`;
+    
+    dimsRow.innerHTML = dimHTML;
+    
+    // Event listeners for Exact Dimensions
+    dimsRow.querySelectorAll('input').forEach(inp => {
+      inp.addEventListener("change", e => {
+        const prop = e.target.getAttribute("data-prop");
+        let val = Number(e.target.value);
+        if (prop === "r") {
+           b.r = (val % 360 + 360) % 360;
+        } else {
+           val = Math.max(1, val); // Prevent zero or negative dimensions
+           b[prop] = val;
+           if (b.shape === "circle" && prop === "w") b.h = val; // Keep circle perfectly round
+        }
+        render(); syncToPython();
+      });
+    });
+
+    row.appendChild(top); 
+    row.appendChild(meta); 
+    row.appendChild(dimsRow);
+    bldListEl.appendChild(row);
   });
 }
 
@@ -434,7 +474,6 @@ function syncToPython() {
   const siteArea = shoelaceArea(STATE.boundary.points);
   const builtArea = STATE.buildings.reduce((s, b) => s + (b.shape==="circle"?Math.PI*(b.w/2)*(b.w/2):shoelaceArea(shapePoints(b))), 0);
   
-  // Safely use the latest Streamlit callback reference
   if (svg.__setStateValue) {
       svg.__setStateValue("layout", {
         boundary: STATE.boundary, buildings: STATE.buildings,
@@ -648,7 +687,7 @@ if "_last_upload_id" not in st.session_state:
 
 with st.sidebar:
     st.markdown("### 🏗️ Site Planner")
-    st.caption("Now featuring infinite Pan/Zoom controls.")
+    st.caption("Now featuring exact Dimension Control.")
     st.divider()
 
     uploaded = st.file_uploader("📂 Load layout (JSON)", type="json")
