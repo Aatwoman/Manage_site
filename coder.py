@@ -1,5 +1,5 @@
 """
-Construction Site Planner  ·  v6.0 (Custom Components v2, Advanced Geometry)
+Construction Site Planner  ·  v7.0 (Infinite Canvas: Pan, Zoom, and Expanded Size)
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -41,7 +41,7 @@ _CANVAS_HTML = """
       <input type="number" id="boundarySides" min="3" max="20" step="1" style="width:54px" />
     </div>
   </div>
-  <div class="hint">Drag a shape onto the site. Select a shape to reveal its handles: drag corner squares to resize symmetrically; drag the top circle handle to rotate.</div>
+  <div class="hint">💡 <b>Pan:</b> Drag canvas background &middot; <b>Zoom:</b> Scroll wheel &middot; <b>Modify:</b> Select a shape to rotate or resize symmetrically.</div>
 
   <div id="main">
     <div id="canvasWrap">
@@ -68,7 +68,7 @@ _CANVAS_CSS = """
   .shape-btn {
     display: flex; align-items: center; gap: 4px;
     border: 1px solid #C7D4E2; background: #fff; border-radius: 6px;
-    padding: 5px 8px; font-size: 12px; cursor: pointer; user-select: none;
+    padding: 6px 10px; font-size: 12.5px; cursor: pointer; user-select: none;
     transition: box-shadow .15s, transform .15s;
   }
   .shape-btn:hover { box-shadow: 0 2px 6px rgba(0,0,0,.12); transform: translateY(-1px); }
@@ -76,69 +76,80 @@ _CANVAS_CSS = """
   .shape-icon { font-size: 13px; }
 
   select, input[type="text"], input[type="number"] {
-    border: 1px solid #C7D4E2; border-radius: 6px; padding: 4px 7px; font-size: 12.5px;
+    border: 1px solid #C7D4E2; border-radius: 6px; padding: 5px 8px; font-size: 12.5px;
   }
 
-  .hint { font-size: 11.5px; color: #8094A8; margin-bottom: 8px; }
+  .hint { font-size: 12px; color: #607182; margin-bottom: 10px; background: #EBF2FA; padding: 6px 10px; border-radius: 6px; display: inline-block; }
 
-  #main { display: flex; gap: 12px; align-items: flex-start; }
+  #main { display: flex; gap: 14px; align-items: flex-start; height: 710px; }
 
   #canvasWrap {
-    flex: 1 1 auto; border: 1px solid #D4DFEA; border-radius: 10px; background: #fff;
-    min-width: 0; position: relative; overflow: hidden;
+    flex: 1 1 auto; height: 100%; border: 1px solid #C7D4E2; border-radius: 10px; background: #fff;
+    min-width: 0; position: relative; overflow: hidden; box-shadow: inset 0 2px 8px rgba(0,0,0,0.04);
   }
-  svg#canvas { width: 100%; height: auto; display: block; touch-action: none; }
+  svg#canvas { width: 100%; height: 100%; display: block; touch-action: none; background: #FAFBFC; }
 
   #side {
-    flex: 0 0 260px; max-width: 260px;
-    border: 1px solid #D4DFEA; border-radius: 10px; background: #fff; padding: 10px;
-    max-height: 480px; overflow-y: auto;
+    flex: 0 0 280px; max-width: 280px; height: 100%;
+    border: 1px solid #D4DFEA; border-radius: 10px; background: #fff; padding: 12px;
+    overflow-y: auto; display: flex; flex-direction: column;
   }
-  #side h4 { margin: 0 0 8px; font-size: 12.5px; color: #4A5A6A; }
+  #side h4 { margin: 0 0 8px; font-size: 13px; color: #4A5A6A; text-transform: uppercase; letter-spacing: 0.5px; }
 
-  .stats-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .stats-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 14px; }
   .stat {
     background: #F0F4FA; border-left: 3px solid #4A90D9; border-radius: 6px;
-    padding: 5px 8px; font-size: 11px; flex: 1 1 70px;
+    padding: 6px 8px; font-size: 11px; flex: 1 1 75px;
   }
-  .stat b { display: block; font-size: 13px; }
+  .stat b { display: block; font-size: 14px; color: #1F2D3D; }
+
+  #bldList { flex: 1 1 auto; overflow-y: auto; }
 
   .bld-row {
-    border: 1px solid #E3EAF2; border-radius: 8px; padding: 7px 8px; margin-bottom: 7px;
+    border: 1px solid #E3EAF2; border-radius: 8px; padding: 8px; margin-bottom: 8px; background: #FFF;
   }
-  .bld-row.selected { border-color: #4A90D9; background: #F3F8FE; }
+  .bld-row.selected { border-color: #4A90D9; background: #F3F8FE; box-shadow: 0 2px 6px rgba(74,144,217,0.15); }
   .bld-row .top { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
   
-  .color-picker { width: 22px; height: 24px; padding: 0; border: 1px solid #C7D4E2; border-radius: 4px; cursor: pointer; flex: none; background: none; }
-  .bld-row input[type="text"] { flex: 1 1 auto; min-width: 0; font-size: 12px; }
+  .color-picker { width: 24px; height: 26px; padding: 0; border: 1px solid #C7D4E2; border-radius: 4px; cursor: pointer; flex: none; background: none; }
+  .bld-row input[type="text"] { flex: 1 1 auto; min-width: 0; font-size: 12.5px; padding: 3px 6px; }
   
-  .icon-btn { border: none; background: #F0F4FA; color: #4A5A6A; border-radius: 4px; width: 24px; height: 24px; cursor: pointer; font-size: 13px; flex: none; display: flex; align-items: center; justify-content: center; }
+  .icon-btn { border: none; background: #F0F4FA; color: #4A5A6A; border-radius: 4px; width: 26px; height: 26px; cursor: pointer; font-size: 13px; flex: none; display: flex; align-items: center; justify-content: center; }
   .icon-btn:hover { background: #E3EAF2; }
   .icon-btn.del { background: #FCEAEA; color: #C0392B; }
   .icon-btn.del:hover { background: #FAD4D4; }
 
-  .bld-row .meta { font-size: 10.5px; color: #8094A8; margin-bottom: 5px; }
-  .warn-badge { color: #E74C3C; font-size: 10.5px; font-weight: 600; }
-  .empty-list { font-size: 12px; color: #95A5B5; text-align: center; padding: 14px 4px; }
+  .bld-row .meta { font-size: 11px; color: #8094A8; margin-bottom: 2px; padding-left: 2px; }
+  .empty-list { font-size: 13px; color: #95A5B5; text-align: center; padding: 30px 4px; }
 """
 
 _CANVAS_JS = """
 export default function(component) {
 const { data, parentElement, setStateValue } = component;
 
-// PREVENT STREAMLIT RERUN GLITCHES
 if (window.__canvas_initialized__) return;
 window.__canvas_initialized__ = true;
 
 // ─────────────────────────────────────────────────────────────
-// CONSTANTS & GEOMETRY MATH
+// STATE & INFINITE CANVAS VIEWPORT
 // ─────────────────────────────────────────────────────────────
 const WORLD_W = 200, WORLD_H = 130;
 const MIN_SIZE = 4;
-let SNAP = 1; // 1 = smooth, 5 = rigid grid
+let SNAP = 1;
+
+// Viewport settings for smooth pan & zoom
+let viewX = 0, viewY = 0, viewW = WORLD_W, viewH = WORLD_H;
+
+let STATE = { boundary: null, buildings: [] };
+let nextId = 1, selected = null, drag = null;
+const svg = parentElement.querySelector("#canvas");
 
 function snap(v) { return Math.round(v / SNAP) * SNAP; }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+function updateViewBox() {
+  svg.setAttribute("viewBox", `${viewX} ${viewY} ${viewW} ${viewH}`);
+}
 
 function getBBox(pts) {
   let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -149,7 +160,6 @@ function getBBox(pts) {
   return {minX, minY, maxX, maxY};
 }
 
-// Math rotation for points (allows accurate collision on rotated shapes)
 function rotatePt([px, py], cx, cy, deg) {
   if (!deg) return [px, py];
   const rad = deg * Math.PI / 180;
@@ -158,7 +168,6 @@ function rotatePt([px, py], cx, cy, deg) {
   return [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos];
 }
 
-// Accurate Polygon Intersections (Separating Axis + Line Intersect)
 function pointInPolygon(px, py, pts) {
   let inside = false;
   for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
@@ -196,7 +205,7 @@ function shoelaceArea(pts) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// BOUNDARY PRESETS
+// BOUNDARIES & SHAPES
 // ─────────────────────────────────────────────────────────────
 const BOUNDARY_DEFAULT_CX = 90, BOUNDARY_DEFAULT_CY = 65, BOUNDARY_DEFAULT_R = 55;
 function genNGon(n, cx, cy, r) {
@@ -217,19 +226,12 @@ const BOUNDARY_PRESETS = {
 };
 
 const BUILDING_SHAPES = {
-  rectangle: { norm: [[0,0],[1,0],[1,1],[0,1]],            defW: 22, defH: 14, label: "Rectangle" },
-  triangle:  { norm: [[0.5,0],[1,1],[0,1]],                 defW: 18, defH: 14, label: "Triangle"  },
-  l_shape:   { norm: [[0,0],[1,0],[1,0.5],[0.5,0.5],[0.5,1],[0,1]], defW: 20, defH: 16, label: "L-Shape" },
-  circle:    { norm: null,                                  defW: 14, defH: 14, label: "Circle"    },
+  rectangle: { norm: [[0,0],[1,0],[1,1],[0,1]],            defW: 24, defH: 16, label: "Rectangle" },
+  triangle:  { norm: [[0.5,0],[1,1],[0,1]],                 defW: 20, defH: 16, label: "Triangle"  },
+  l_shape:   { norm: [[0,0],[1,0],[1,0.5],[0.5,0.5],[0.5,1],[0,1]], defW: 22, defH: 18, label: "L-Shape" },
+  circle:    { norm: null,                                  defW: 16, defH: 16, label: "Circle"    },
 };
 const COLORS = ["#4A90D9", "#E07B39", "#6BBF59", "#9B59B6", "#16A085", "#D4AC0D", "#C0392B", "#7F8C8D"];
-
-// ─────────────────────────────────────────────────────────────
-// STATE
-// ─────────────────────────────────────────────────────────────
-let STATE = { boundary: null, buildings: [] };
-let nextId = 1, selected = null, drag = null;
-const svg = parentElement.querySelector("#canvas");
 
 function scalePoints(norm, x, y, w, h) {
   return norm.map(([nx, ny]) => [x + nx * w, y + ny * h]);
@@ -238,11 +240,7 @@ function shapePoints(b) {
   let pts;
   if (b.shape === "circle") {
     const cx = b.x + b.w/2, cy = b.y + b.h/2, r = b.w/2;
-    pts = [];
-    for (let i = 0; i < 28; i++) {
-      const a = (2 * Math.PI * i) / 28;
-      pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
-    }
+    pts = []; for (let i = 0; i < 24; i++) { const a = (2 * Math.PI * i) / 24; pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]); }
   } else {
     pts = scalePoints(BUILDING_SHAPES[b.shape].norm, b.x, b.y, b.w, b.h);
   }
@@ -269,19 +267,17 @@ function makeHandles(b) {
   const group = el("g", {});
   if (b.r) group.setAttribute("transform", `rotate(${b.r}, ${cx}, ${cy})`);
   
-  // corner resize handles
   const corners = [["nw", b.x, b.y], ["ne", b.x+b.w, b.y], ["sw", b.x, b.y+b.h], ["se", b.x+b.w, b.y+b.h]];
   for (const [corner, px, py] of corners) {
     if (b.shape === "circle" && corner !== "se") continue;
     group.appendChild(el("rect", {
-      x: px - 2.6, y: py - 2.6, width: 5.2, height: 5.2,
+      x: px - 2.5, y: py - 2.5, width: 5, height: 5,
       fill: "#fff", stroke: "#4A90D9", "stroke-width": 1,
       "data-role": "handle", "data-target": "resize", "data-id": b.id,
       style: `cursor:${corner}-resize`,
     }));
   }
   
-  // rotation handle
   group.appendChild(el("line", { x1: cx, y1: b.y, x2: cx, y2: b.y - 14, stroke: "#4A90D9", "stroke-width": 1, "stroke-dasharray": "2,2" }));
   group.appendChild(el("circle", {
     cx: cx, cy: b.y - 14, r: 3.5,
@@ -289,36 +285,37 @@ function makeHandles(b) {
     "data-role": "handle", "data-target": "rotate", "data-id": b.id,
     style: "cursor: crosshair",
   }));
-  
   return group;
 }
 
 // ─────────────────────────────────────────────────────────────
-// RENDER LOOP
+// MAIN RENDER LOOP
 // ─────────────────────────────────────────────────────────────
 function render() {
   svg.innerHTML = "";
 
   const defs = el("defs", {});
   const pattern = el("pattern", { id: "grid", width: 10, height: 10, patternUnits: "userSpaceOnUse" });
-  pattern.appendChild(el("path", { d: "M 10 0 L 0 0 0 10", fill: "none", stroke: "#EEF2F7", "stroke-width": 0.5 }));
+  pattern.appendChild(el("path", { d: "M 10 0 L 0 0 0 10", fill: "none", stroke: "#E9EFF5", "stroke-width": 0.5 }));
   defs.appendChild(pattern);
   svg.appendChild(defs);
-  svg.appendChild(el("rect", { x: 0, y: 0, width: WORLD_W, height: WORLD_H, fill: "url(#grid)" }));
+  
+  // Base background collector for Canvas Panning clicks
+  svg.appendChild(el("rect", { x: -2000, y: -2000, width: 4000, height: 4000, fill: "url(#grid)", "data-role": "bg" }));
 
   const bPts = STATE.boundary.points;
   const isBndSel = selected && selected.type === "boundary";
   svg.appendChild(el("polygon", {
-    points: pointsToAttr(bPts), fill: "rgba(74,144,217,0.07)",
-    stroke: isBndSel ? "#4A90D9" : "#9FB4CC", "stroke-width": isBndSel ? 2 : 1.3,
-    "stroke-dasharray": "6,3", "data-role": "boundary",
+    points: pointsToAttr(bPts), fill: "rgba(74,144,217,0.06)",
+    stroke: isBndSel ? "#4A90D9" : "#9FB4CC", "stroke-width": isBndSel ? 2 : 1.4,
+    "stroke-dasharray": "5,3", "data-role": "boundary",
   }));
   
   if (isBndSel) {
     const vg = el("g", {});
     bPts.forEach(([x, y], i) => {
       vg.appendChild(el("circle", {
-        cx: x, cy: y, r: 3.5, fill: "#fff", stroke: "#4A90D9", "stroke-width": 1.4,
+        cx: x, cy: y, r: 3.5, fill: "#fff", stroke: "#4A90D9", "stroke-width": 1.5,
         "data-role": "handle", "data-target": "boundary-vertex", "data-index": i, style: "cursor:move",
       }));
     });
@@ -336,25 +333,23 @@ function render() {
       points: pointsToAttr(pts),
       fill: b.color, "fill-opacity": isSel ? 0.9 : 0.6,
       stroke: (!inside || overlapping) ? "#E74C3C" : b.color,
-      "stroke-width": isSel ? 2.4 : 1.4,
+      "stroke-width": isSel ? 2.5 : 1.5,
       "stroke-dasharray": (!inside || overlapping) ? "4,2" : "none",
     }));
 
     const cx = b.x + b.w/2, cy = b.y + b.h/2;
     const label = el("text", {
       x: cx, y: cy, "text-anchor": "middle", "dominant-baseline": "middle",
-      "font-size": 5.4, fill: "#1F2D3D", "pointer-events": "none",
+      "font-size": 5.5, fill: "#1F2D3D", "pointer-events": "none", "font-weight": "600"
     });
     if (b.r) label.setAttribute("transform", `rotate(${b.r}, ${cx}, ${cy})`);
     label.textContent = b.name;
     g.appendChild(label);
 
     if (!inside || overlapping) {
-      const warn = el("text", { x: getBBox(pts).minX, y: getBBox(pts).minY - 1.5, "font-size": 6, "pointer-events": "none" });
-      warn.textContent = "\u26A0";
-      g.appendChild(warn);
+      const warn = el("text", { x: getBBox(pts).minX, y: getBBox(pts).minY - 2, "font-size": 7, "pointer-events": "none" });
+      warn.textContent = "⚠️"; g.appendChild(warn);
     }
-    
     svg.appendChild(g);
     if (isSel) svg.appendChild(makeHandles(b));
   });
@@ -372,65 +367,45 @@ function renderSidePanel() {
     <div class="stat">Utilisation<b>${siteArea>0?((builtArea/siteArea)*100).toFixed(1):0}%</b></div>
   `;
 
-  const bldListEl = parentElement.querySelector("#bldList");
-  bldListEl.innerHTML = "";
-  if (STATE.buildings.length === 0) {
-    bldListEl.innerHTML = '<div class="empty-list">No shapes yet.</div>';
-    return;
-  }
+  const bldListEl = parentElement.querySelector("#bldList"); bldListEl.innerHTML = "";
+  if (STATE.buildings.length === 0) { bldListEl.innerHTML = '<div class="empty-list">No shapes yet.</div>'; return; }
   
   STATE.buildings.forEach(b => {
     const row = document.createElement("div");
     row.className = "bld-row" + (selected && selected.type === "building" && selected.id === b.id ? " selected" : "");
     row.addEventListener("pointerdown", () => {
-      // Bring to front on select
-      STATE.buildings = STATE.buildings.filter(x => x.id !== b.id);
-      STATE.buildings.push(b);
-      selected = { type: "building", id: b.id };
-      render();
+      STATE.buildings = STATE.buildings.filter(x => x.id !== b.id); STATE.buildings.push(b);
+      selected = { type: "building", id: b.id }; render();
     });
 
-    const top = document.createElement("div");
-    top.className = "top";
-    
-    const cp = document.createElement("input");
-    cp.type = "color"; cp.className = "color-picker"; cp.value = b.color;
+    const top = document.createElement("div"); top.className = "top";
+    const cp = document.createElement("input"); cp.type = "color"; cp.className = "color-picker"; cp.value = b.color;
     cp.addEventListener("input", e => { b.color = e.target.value; render(); });
     cp.addEventListener("change", () => syncToPython());
     
-    const ni = document.createElement("input");
-    ni.type = "text"; ni.value = b.name;
+    const ni = document.createElement("input"); ni.type = "text"; ni.value = b.name;
     ni.addEventListener("input", e => b.name = e.target.value);
     ni.addEventListener("change", () => { render(); syncToPython(); });
     
-    const dupBtn = document.createElement("button");
-    dupBtn.className = "icon-btn"; dupBtn.title = "Duplicate"; dupBtn.innerHTML = "&#10697;";
+    const dupBtn = document.createElement("button"); dupBtn.className = "icon-btn"; dupBtn.title = "Duplicate"; dupBtn.innerHTML = "⧉";
     dupBtn.addEventListener("click", e => {
-      e.stopPropagation();
-      const copy = JSON.parse(JSON.stringify(b));
-      copy.id = nextId++; copy.x += 5; copy.y += 5; copy.name += " (Copy)";
-      STATE.buildings.push(copy);
-      selected = { type: "building", id: copy.id };
+      e.stopPropagation(); const clone = JSON.parse(JSON.stringify(b));
+      clone.id = nextId++; clone.x += 6; clone.y += 6; clone.name += " (Copy)";
+      STATE.buildings.push(clone); selected = { type: "building", id: clone.id };
       render(); syncToPython();
     });
     
-    const delBtn = document.createElement("button");
-    delBtn.className = "icon-btn del"; delBtn.title = "Delete"; delBtn.innerHTML = "&#10005;";
+    const delBtn = document.createElement("button"); delBtn.className = "icon-btn del"; delBtn.title = "Delete"; delBtn.innerHTML = "&#10005;";
     delBtn.addEventListener("click", e => {
-      e.stopPropagation();
-      STATE.buildings = STATE.buildings.filter(x => x.id !== b.id);
+      e.stopPropagation(); STATE.buildings = STATE.buildings.filter(x => x.id !== b.id);
       if (selected && selected.id === b.id) selected = null;
       render(); syncToPython();
     });
     
     top.appendChild(cp); top.appendChild(ni); top.appendChild(dupBtn); top.appendChild(delBtn);
-    
-    const meta = document.createElement("div");
-    meta.className = "meta";
+    const meta = document.createElement("div"); meta.className = "meta";
     meta.innerHTML = `${BUILDING_SHAPES[b.shape].label} &middot; ${b.r||0}&deg; rotation`;
-
-    row.appendChild(top); row.appendChild(meta);
-    bldListEl.appendChild(row);
+    row.appendChild(top); row.appendChild(meta); bldListEl.appendChild(row);
   });
 }
 
@@ -445,24 +420,42 @@ function syncToPython() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// TOOLBAR & INTERACTION
+# INTERACTION & INFINITE PAN/ZOOM CONTROL
 // ─────────────────────────────────────────────────────────────
 parentElement.querySelector("#snapGrid").addEventListener("change", e => { SNAP = e.target.checked ? 5 : 1; });
 parentElement.querySelector("#clearBtn").addEventListener("click", () => {
-  if(confirm("Clear all shapes?")) { STATE.buildings = []; selected = null; render(); syncToPython(); }
+  if(confirm("Clear layout canvas?")) { STATE.buildings = []; selected = null; render(); syncToPython(); }
 });
+
+// Smooth Zoom logic via Mouse Wheel
+svg.addEventListener("wheel", e => {
+  e.preventDefault();
+  const zoomFactor = e.deltaY > 0 ? 1.08 : 0.92;
+  
+  const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+  const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+  
+  const targetW = clamp(viewW * zoomFactor, 30, 900);
+  const targetH = targetW * (WORLD_H / WORLD_W);
+  
+  viewX = p.x - (p.x - viewX) * (targetW / viewW);
+  viewY = p.y - (p.y - viewY) * (targetH / viewH);
+  viewW = targetW; viewH = targetH;
+  
+  updateViewBox();
+}, { passive: false });
 
 function addBuilding(shape, worldX, worldY) {
   const def = BUILDING_SHAPES[shape];
-  const x = worldX !== undefined ? snap(worldX - def.defW/2) : snap(20 + (STATE.buildings.length % 5)*4);
-  const y = worldY !== undefined ? snap(worldY - def.defH/2) : snap(20 + (STATE.buildings.length % 5)*4);
+  // If dropped, center it exactly where pointer dropped it inside the current panning position
+  const x = worldX !== undefined ? snap(worldX - def.defW/2) : snap(viewX + viewW/3);
+  const y = worldY !== undefined ? snap(worldY - def.defH/2) : snap(viewY + viewH/3);
   const b = {
     id: nextId++, shape, x, y, w: def.defW, h: def.defH, r: 0,
     name: `${def.label} ${STATE.buildings.length + 1}`,
     color: COLORS[STATE.buildings.length % COLORS.length],
   };
-  STATE.buildings.push(b);
-  selected = { type: "building", id: b.id };
+  STATE.buildings.push(b); selected = { type: "building", id: b.id };
   render(); syncToPython();
 }
 
@@ -472,9 +465,7 @@ parentElement.querySelectorAll(".shape-btn[data-shape]").forEach(btn => {
 });
 svg.addEventListener("dragover", e => e.preventDefault());
 svg.addEventListener("drop", e => {
-  e.preventDefault();
-  const shape = e.dataTransfer.getData("text");
-  if (!BUILDING_SHAPES[shape]) return;
+  e.preventDefault(); const shape = e.dataTransfer.getData("text"); if (!BUILDING_SHAPES[shape]) return;
   const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
   const p = pt.matrixTransform(svg.getScreenCTM().inverse());
   addBuilding(shape, p.x, p.y);
@@ -483,81 +474,77 @@ svg.addEventListener("drop", e => {
 const bSel = parentElement.querySelector("#boundarySelect");
 const bSides = parentElement.querySelector("#boundarySides");
 bSel.addEventListener("change", () => {
-  const p = bSel.value;
-  STATE.boundary = { preset: p, sides: BOUNDARY_PRESETS[p].length, points: BOUNDARY_PRESETS[p].map(x => [...x]) };
-  bSides.value = STATE.boundary.sides;
-  render(); syncToPython();
+  const p = bSel.value; STATE.boundary = { preset: p, sides: BOUNDARY_PRESETS[p].length, points: BOUNDARY_PRESETS[p].map(x => [...x]) };
+  bSides.value = STATE.boundary.sides; render(); syncToPython();
 });
 bSides.addEventListener("change", () => {
-  let n = clamp(Math.round(Number(bSides.value))||4, 3, 20);
-  bSides.value = n;
+  let n = clamp(Math.round(Number(bSides.value))||4, 3, 20); bSides.value = n;
   let sx=0, sy=0; STATE.boundary.points.forEach(p => { sx+=p[0]; sy+=p[1]; });
   STATE.boundary = { preset: "custom", sides: n, points: genNGon(n, sx/STATE.boundary.points.length, sy/STATE.boundary.points.length, BOUNDARY_DEFAULT_R) };
   render(); syncToPython();
 });
 
-// POINTER EVENTS
 svg.addEventListener("pointerdown", e => {
   const target = e.target.closest("[data-role]");
   const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
   const p = pt.matrixTransform(svg.getScreenCTM().inverse());
 
-  if (!target) { selected = null; render(); return; }
+  // Clicked the background grid directly -> Trigger Panning Mode
+  if (!target || target.getAttribute("data-role") === "bg") {
+    selected = null;
+    drag = { mode: "pan", startClientX: e.clientX, startClientY: e.clientY, startViewX: viewX, startViewY: viewY };
+    svg.setPointerCapture(e.pointerId); render(); return;
+  }
   const role = target.getAttribute("data-role");
 
   if (role === "handle") {
     const tType = target.getAttribute("data-target");
     if (tType === "boundary-vertex") {
-      selected = { type: "boundary" };
-      drag = { mode: "vertex", index: Number(target.getAttribute("data-index")) };
+      selected = { type: "boundary" }; drag = { mode: "vertex", index: Number(target.getAttribute("data-index")) };
     } else {
-      const obj = STATE.buildings.find(b => String(b.id) === target.getAttribute("data-id"));
-      if (!obj) return;
-      if (tType === "rotate") {
-        drag = { mode: "rotate", obj };
-      } else {
-        // For accurate symmetric resize, grab the CTM of the rotated handle group
-        drag = { mode: "resize", obj, isCircle: obj.shape==="circle", ctm: target.closest('g').getScreenCTM().inverse() };
-      }
+      const obj = STATE.buildings.find(b => String(b.id) === target.getAttribute("data-id")); if (!obj) return;
+      if (tType === "rotate") drag = { mode: "rotate", obj };
+      else drag = { mode: "resize", obj, isCircle: obj.shape==="circle", ctm: target.closest('g').getScreenCTM().inverse() };
     }
-    svg.setPointerCapture(e.pointerId);
-    return;
+    svg.setPointerCapture(e.pointerId); return;
   }
   
   if (role === "building") {
-    const id = Number(target.getAttribute("data-id"));
-    const b = STATE.buildings.find(x => x.id === id);
-    if (!b) return;
-    STATE.buildings = STATE.buildings.filter(x => x.id !== id);
-    STATE.buildings.push(b);
+    const id = Number(target.getAttribute("data-id")); const b = STATE.buildings.find(x => x.id === id); if (!b) return;
+    STATE.buildings = STATE.buildings.filter(x => x.id !== id); STATE.buildings.push(b);
     selected = { type: "building", id };
     drag = { mode: "move", obj: b, offX: p.x - b.x, offY: p.y - b.y };
-    svg.setPointerCapture(e.pointerId);
-    render(); return;
+    svg.setPointerCapture(e.pointerId); render(); return;
   }
-  
   if (role === "boundary") { selected = { type: "boundary" }; render(); }
 });
 
 svg.addEventListener("pointermove", e => {
   if (!drag) return;
+  
+  // Dynamic Background Panning Math
+  if (drag.mode === "pan") {
+    const factorX = viewW / svg.clientWidth;
+    const factorY = viewH / svg.clientHeight;
+    viewX = drag.startViewX - (e.clientX - drag.startClientX) * factorX;
+    viewY = drag.startViewY - (e.clientY - drag.startClientY) * factorY;
+    updateViewBox(); return;
+  }
+
   const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
   const p = pt.matrixTransform(svg.getScreenCTM().inverse());
   const wx = p.x, wy = p.y, obj = drag.obj;
 
   if (drag.mode === "vertex") {
-    STATE.boundary.points[drag.index] = [clamp(snap(wx), -WORLD_W, WORLD_W*2), clamp(snap(wy), -WORLD_H, WORLD_H*2)];
+    STATE.boundary.points[drag.index] = [snap(wx), snap(wy)];
   } else if (drag.mode === "move") {
-    obj.x = clamp(snap(wx - drag.offX), -WORLD_W, WORLD_W*2);
-    obj.y = clamp(snap(wy - drag.offY), -WORLD_H, WORLD_H*2);
+    obj.x = snap(wx - drag.offX); obj.y = snap(wy - drag.offY);
   } else if (drag.mode === "rotate") {
     const cx = obj.x + obj.w/2, cy = obj.y + obj.h/2;
     let deg = (Math.atan2(wy - cy, wx - cx) * 180 / Math.PI) + 90;
-    if (e.shiftKey) deg = Math.round(deg/15)*15; // Shift to snap 15 deg
-    else deg = Math.round(deg/5)*5; // Standard 5 deg snap
+    deg = e.shiftKey ? Math.round(deg/15)*15 : Math.round(deg/5)*5;
     obj.r = (deg % 360 + 360) % 360;
   } else if (drag.mode === "resize") {
-    // Symmetrical resize using the local coordinate matrix
     const localP = pt.matrixTransform(drag.ctm);
     const cx = obj.x + obj.w/2, cy = obj.y + obj.h/2;
     if (drag.isCircle) {
@@ -573,30 +560,24 @@ svg.addEventListener("pointermove", e => {
 });
 
 function endDrag(e) {
-  if (!drag) return;
-  drag = null;
-  try { svg.releasePointerCapture(e.pointerId); } catch(e){}
-  syncToPython();
+  if (!drag) return; let baselineMode = drag.mode; drag = null;
+  try { svg.releasePointerCapture(e.pointerId); } catch(err){}
+  if (baselineMode !== "pan") syncToPython();
 }
 svg.addEventListener("pointerup", endDrag);
 svg.addEventListener("pointercancel", endDrag);
 
-// ─────────────────────────────────────────────────────────────
-// INITIALIZATION
-// ─────────────────────────────────────────────────────────────
 function loadState(raw) {
   let s = raw ? JSON.parse(JSON.stringify(raw)) : {};
   if (!s.boundary) s.boundary = { preset: "rectangle", sides: 4, points: BOUNDARY_PRESETS.rectangle.map(p => [...p]) };
   if (!s.buildings) s.buildings = [];
   STATE = s;
-  nextId = STATE.buildings.reduce((m, b) => Math.max(m, b.id + 1), 1);
-  selected = null;
+  nextId = STATE.buildings.reduce((m, b) => Math.max(m, b.id + 1), 1); selected = null;
 }
 
 loadState(data);
-bSel.value = STATE.boundary.preset;
-bSides.value = STATE.boundary.sides;
-render();
+bSel.value = STATE.boundary.preset; bSides.value = STATE.boundary.sides;
+updateViewBox(); render();
 if (!data || data.site_area === undefined) syncToPython();
 }
 """
@@ -613,12 +594,12 @@ def site_canvas(initial_state: dict, version: int):
         data=initial_state,
         default={"layout": initial_state},
         key=f"canvas-{version}",
-        height=620,
+        height=800, # Increased full visual height space on screen
         on_layout_change=lambda: None,
     )
 
 # ─────────────────────────────────────────────────────────────
-# DEFAULT STATE & PYTHON LAYOUT
+# STATE ARCHITECTURE
 # ─────────────────────────────────────────────────────────────
 DEFAULT_STATE = {
     "boundary": {
@@ -641,7 +622,7 @@ if "_last_upload_id" not in st.session_state:
 
 with st.sidebar:
     st.markdown("### 🏗️ Site Planner")
-    st.caption("Drag shapes to build your layout.")
+    st.caption("Now featuring infinite Pan/Zoom controls.")
     st.divider()
 
     uploaded = st.file_uploader("📂 Load layout (JSON)", type="json")
