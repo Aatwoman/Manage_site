@@ -1,5 +1,5 @@
 """
-Construction Site Planner  ·  v7.0 (Infinite Canvas: Pan, Zoom, and Expanded Size)
+Construction Site Planner  ·  v7.1 (Fixed JS Comment Syntax Error)
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -137,7 +137,6 @@ const WORLD_W = 200, WORLD_H = 130;
 const MIN_SIZE = 4;
 let SNAP = 1;
 
-// Viewport settings for smooth pan & zoom
 let viewX = 0, viewY = 0, viewW = WORLD_W, viewH = WORLD_H;
 
 let STATE = { boundary: null, buildings: [] };
@@ -300,7 +299,6 @@ function render() {
   defs.appendChild(pattern);
   svg.appendChild(defs);
   
-  // Base background collector for Canvas Panning clicks
   svg.appendChild(el("rect", { x: -2000, y: -2000, width: 4000, height: 4000, fill: "url(#grid)", "data-role": "bg" }));
 
   const bPts = STATE.boundary.points;
@@ -420,14 +418,13 @@ function syncToPython() {
 }
 
 // ─────────────────────────────────────────────────────────────
-# INTERACTION & INFINITE PAN/ZOOM CONTROL
+// INTERACTION & INFINITE PAN/ZOOM CONTROL
 // ─────────────────────────────────────────────────────────────
 parentElement.querySelector("#snapGrid").addEventListener("change", e => { SNAP = e.target.checked ? 5 : 1; });
 parentElement.querySelector("#clearBtn").addEventListener("click", () => {
   if(confirm("Clear layout canvas?")) { STATE.buildings = []; selected = null; render(); syncToPython(); }
 });
 
-// Smooth Zoom logic via Mouse Wheel
 svg.addEventListener("wheel", e => {
   e.preventDefault();
   const zoomFactor = e.deltaY > 0 ? 1.08 : 0.92;
@@ -447,7 +444,6 @@ svg.addEventListener("wheel", e => {
 
 function addBuilding(shape, worldX, worldY) {
   const def = BUILDING_SHAPES[shape];
-  // If dropped, center it exactly where pointer dropped it inside the current panning position
   const x = worldX !== undefined ? snap(worldX - def.defW/2) : snap(viewX + viewW/3);
   const y = worldY !== undefined ? snap(worldY - def.defH/2) : snap(viewY + viewH/3);
   const b = {
@@ -489,7 +485,6 @@ svg.addEventListener("pointerdown", e => {
   const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
   const p = pt.matrixTransform(svg.getScreenCTM().inverse());
 
-  // Clicked the background grid directly -> Trigger Panning Mode
   if (!target || target.getAttribute("data-role") === "bg") {
     selected = null;
     drag = { mode: "pan", startClientX: e.clientX, startClientY: e.clientY, startViewX: viewX, startViewY: viewY };
@@ -522,7 +517,6 @@ svg.addEventListener("pointerdown", e => {
 svg.addEventListener("pointermove", e => {
   if (!drag) return;
   
-  // Dynamic Background Panning Math
   if (drag.mode === "pan") {
     const factorX = viewW / svg.clientWidth;
     const factorY = viewH / svg.clientHeight;
@@ -594,7 +588,7 @@ def site_canvas(initial_state: dict, version: int):
         data=initial_state,
         default={"layout": initial_state},
         key=f"canvas-{version}",
-        height=800, # Increased full visual height space on screen
+        height=800,
         on_layout_change=lambda: None,
     )
 
