@@ -1,5 +1,5 @@
 """
-Construction Site Planner  ·  v7.2 (Fixed Invisible Canvas Remount Bug)
+Construction Site Planner  ·  v7.3 (Stable Mounts & 100k Max Area Limit)
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -41,7 +41,7 @@ _CANVAS_HTML = """
       <input type="number" id="boundarySides" min="3" max="20" step="1" style="width:54px" />
     </div>
   </div>
-  <div class="hint">💡 <b>Pan:</b> Drag canvas background &middot; <b>Zoom:</b> Scroll wheel &middot; <b>Modify:</b> Select a shape to rotate or resize symmetrically.</div>
+  <div class="hint">💡 <b>Pan:</b> Drag canvas background &middot; <b>Zoom:</b> Scroll wheel &middot; <b>Modify:</b> Select a shape to rotate or resize symmetrically. (Max Area: 100,000 m²)</div>
 
   <div id="main">
     <div id="canvasWrap">
@@ -128,11 +128,16 @@ _CANVAS_JS = """
 export default function(component) {
 const { data, parentElement, setStateValue } = component;
 
+// Ensure JS only evaluates once per component mount to prevent infinite reruns and lag
+if (parentElement.dataset.initialized === "true") return;
+parentElement.dataset.initialized = "true";
+
 // ─────────────────────────────────────────────────────────────
 // STATE & INFINITE CANVAS VIEWPORT CONFIG
 // ─────────────────────────────────────────────────────────────
 const WORLD_W = 200, WORLD_H = 130;
 const MIN_SIZE = 4;
+const MAX_AREA = 100000;
 let SNAP = 1;
 
 let viewX = 0, viewY = 0, viewW = WORLD_W, viewH = WORLD_H;
@@ -303,7 +308,7 @@ function render() {
   defs.appendChild(pattern);
   svg.appendChild(defs);
   
-  svg.appendChild(el("rect", { x: -2000, y: -2000, width: 4000, height: 4000, fill: "url(#grid)", "data-role": "bg" }));
+  svg.appendChild(el("rect", { x: -5000, y: -5000, width: 10000, height: 10000, fill: "url(#grid)", "data-role": "bg" }));
 
   const bPts = STATE.boundary.points;
   const isBndSel = selected && selected.type === "boundary";
@@ -539,7 +544,12 @@ svg.addEventListener("pointermove", e => {
   const obj = drag.obj;
 
   if (drag.mode === "vertex") {
+    // Math clamp to prevent dragging vertex so far out that area exceeds 100,000
+    const oldPt = STATE.boundary.points[drag.index];
     STATE.boundary.points[drag.index] = [snap(wx), snap(wy)];
+    if (shoelaceArea(STATE.boundary.points) > MAX_AREA) {
+       STATE.boundary.points[drag.index] = oldPt; // Hit max area limit, reject drag
+    }
   } else if (drag.mode === "move") {
     obj.x = snap(wx - drag.offX); obj.y = snap(wy - drag.offY);
   } else if (drag.mode === "rotate") {
