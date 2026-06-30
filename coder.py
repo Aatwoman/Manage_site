@@ -677,10 +677,12 @@ loadState(data);
 boundarySelect.value = STATE.boundary.preset;
 boundarySidesInput.value = STATE.boundary.sides;
 render();
-// Echo the freshly-loaded state straight back to Python so its
-// session_state (and derived stats) stay consistent with what's
-// now on screen, instead of waiting for the first user edit.
-syncToPython();
+
+// Echo the freshly-loaded state straight back to Python only if it doesn't
+// already contain the calculated metrics. This prevents an infinite rerun loop.
+if (!data || data.site_area === undefined) {
+  syncToPython();
+}
 
 }
 """
@@ -717,6 +719,9 @@ DEFAULT_STATE = {
         "points": [[15, 15], [165, 15], [165, 110], [15, 110]],
     },
     "buildings": [],
+    "site_area": 14250,
+    "built_area": 0,
+    "utilization_pct": 0.0,
 }
 
 
