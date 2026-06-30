@@ -1,34 +1,10 @@
 """
-Construction Site Planner  ·  v5.0 (single-file, Custom Components v2)
-─────────────────────────────────────────────────────────────────────────────
-Everything — Python, HTML, CSS, and JS — lives in this one file. No separate
-components/canvas/index.html, no folder structure to get right when
-deploying: just this file plus requirements.txt at the root of your repo.
-
-This uses Streamlit's Custom Components v2 API (st.components.v2.component,
-added in Streamlit 1.51), which accepts raw HTML/CSS/JS as Python strings
-directly — no declare_component(path=...) pointing at a file on disk, and no
-hand-rolled postMessage protocol. Communication with Python is native to the
-API: the JS side calls setStateValue("layout", {...}) whenever an edit
-commits (a drag ends, a dropdown changes, etc.), and Python reads it back via
-result.layout after the component call. This is the same officially
-supported, reliable approach as before — just inlined instead of split
-across files.
-
-One v2-specific design note: a v2 component receives its `data` only once,
-at mount time. Updating `data` on a later Streamlit rerun does not push new
-values into an already-mounted instance — to force a fresh load (e.g. after
-"Reset" or after uploading a saved JSON layout), this app bumps a `version`
-counter and folds it into the component's `key`, which forces v2 to remount
-the component with the new data. Ongoing edits within a single mount
-(dragging, typing) flow back to Python via setStateValue/result.layout as
-normal and don't need a remount.
+Construction Site Planner  ·  v6.0 (Custom Components v2, Advanced Geometry)
 ─────────────────────────────────────────────────────────────────────────────
 """
 
 import json
 import copy
-
 import streamlit as st
 
 # ─────────────────────────────────────────────────────────────
@@ -40,17 +16,19 @@ st.set_page_config(page_title="Site Planner", page_icon="🏗️", layout="wide"
 # CANVAS COMPONENT — HTML / CSS / JS, inlined as plain strings
 # ─────────────────────────────────────────────────────────────
 _CANVAS_HTML = """
-
-
   <div id="toolbar">
     <div class="group">
-      <label>Add building (drag onto site):</label>
-      <button class="shape-btn" draggable="true" data-shape="rectangle"><span class="shape-icon">&#9646;</span>Rectangle</button>
+      <label>Add shape:</label>
+      <button class="shape-btn" draggable="true" data-shape="rectangle"><span class="shape-icon">&#9646;</span>Rect</button>
       <button class="shape-btn" draggable="true" data-shape="circle"><span class="shape-icon">&#9679;</span>Circle</button>
-      <button class="shape-btn" draggable="true" data-shape="triangle"><span class="shape-icon">&#9650;</span>Triangle</button>
+      <button class="shape-btn" draggable="true" data-shape="triangle"><span class="shape-icon">&#9650;</span>Tri</button>
       <button class="shape-btn" draggable="true" data-shape="l_shape"><span class="shape-icon">&#8990;</span>L-Shape</button>
     </div>
-    <div class="group">
+    <div class="group" style="margin-left: 10px; padding-left: 10px; border-left: 1px solid #D4DFEA;">
+      <label><input type="checkbox" id="snapGrid"> Grid Snap</label>
+      <button class="shape-btn" id="clearBtn" style="color: #C0392B;">Clear All</button>
+    </div>
+    <div class="group" style="margin-left: auto;">
       <label>Site boundary:</label>
       <select id="boundarySelect">
         <option value="rectangle">Rectangle</option>
@@ -59,13 +37,11 @@ _CANVAS_HTML = """
         <option value="hexagon">Hexagon</option>
         <option value="trapezoid">Trapezoid</option>
       </select>
-    </div>
-    <div class="group">
       <label>Sides:</label>
       <input type="number" id="boundarySides" min="3" max="20" step="1" style="width:54px" />
     </div>
   </div>
-  <div class="hint">Drag a shape onto the site to add it (or click it). Drag a building to move it; drag a corner square to resize it. Click the boundary to select it, then drag any vertex (small circle) to reshape it — change "Sides" to regenerate it with a different number of vertices. Click empty space to deselect.</div>
+  <div class="hint">Drag a shape onto the site. Select a shape to reveal its handles: drag corner squares to resize symmetrically; drag the top circle handle to rotate.</div>
 
   <div id="main">
     <div id="canvasWrap">
@@ -78,28 +54,26 @@ _CANVAS_HTML = """
       <div id="bldList"></div>
     </div>
   </div>
-
 """
 
 _CANVAS_CSS = """
-
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
   body { padding: 10px; background: #F7F9FC; color: #1F2D3D; }
 
-  #toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-bottom: 8px; }
+  #toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 8px; }
   .group { display: flex; align-items: center; gap: 6px; }
-  .group label { font-size: 12px; font-weight: 600; color: #4A5A6A; }
+  .group label { font-size: 12px; font-weight: 600; color: #4A5A6A; cursor: pointer; }
 
   .shape-btn {
-    display: flex; align-items: center; gap: 5px;
-    border: 1px solid #C7D4E2; background: #fff; border-radius: 8px;
-    padding: 6px 10px; font-size: 12.5px; cursor: grab; user-select: none;
+    display: flex; align-items: center; gap: 4px;
+    border: 1px solid #C7D4E2; background: #fff; border-radius: 6px;
+    padding: 5px 8px; font-size: 12px; cursor: pointer; user-select: none;
     transition: box-shadow .15s, transform .15s;
   }
   .shape-btn:hover { box-shadow: 0 2px 6px rgba(0,0,0,.12); transform: translateY(-1px); }
-  .shape-btn:active { cursor: grabbing; }
-  .shape-icon { font-size: 14px; }
+  .shape-btn:active { transform: translateY(0); }
+  .shape-icon { font-size: 13px; }
 
   select, input[type="text"], input[type="number"] {
     border: 1px solid #C7D4E2; border-radius: 6px; padding: 4px 7px; font-size: 12.5px;
@@ -111,12 +85,12 @@ _CANVAS_CSS = """
 
   #canvasWrap {
     flex: 1 1 auto; border: 1px solid #D4DFEA; border-radius: 10px; background: #fff;
-    min-width: 0; position: relative;
+    min-width: 0; position: relative; overflow: hidden;
   }
-  svg#canvas { width: 100%; height: auto; display: block; border-radius: 10px; touch-action: none; }
+  svg#canvas { width: 100%; height: auto; display: block; touch-action: none; }
 
   #side {
-    flex: 0 0 240px; max-width: 240px;
+    flex: 0 0 260px; max-width: 260px;
     border: 1px solid #D4DFEA; border-radius: 10px; background: #fff; padding: 10px;
     max-height: 480px; overflow-y: auto;
   }
@@ -127,54 +101,105 @@ _CANVAS_CSS = """
     background: #F0F4FA; border-left: 3px solid #4A90D9; border-radius: 6px;
     padding: 5px 8px; font-size: 11px; flex: 1 1 70px;
   }
-  .stat b { display: block; font-size: 13.5px; }
+  .stat b { display: block; font-size: 13px; }
 
   .bld-row {
     border: 1px solid #E3EAF2; border-radius: 8px; padding: 7px 8px; margin-bottom: 7px;
   }
   .bld-row.selected { border-color: #4A90D9; background: #F3F8FE; }
   .bld-row .top { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
-  .swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+  
+  .color-picker { width: 22px; height: 24px; padding: 0; border: 1px solid #C7D4E2; border-radius: 4px; cursor: pointer; flex: none; background: none; }
   .bld-row input[type="text"] { flex: 1 1 auto; min-width: 0; font-size: 12px; }
-  .bld-row .meta { font-size: 10.5px; color: #8094A8; margin-bottom: 5px; }
-  .bld-row .thresh-row { display: flex; align-items: center; gap: 5px; }
-  .bld-row .thresh-row label { font-size: 11px; color: #4A5A6A; }
-  .bld-row .thresh-row input { width: 70px; }
-  .del-btn {
-    border: none; background: #FCEAEA; color: #C0392B; border-radius: 6px;
-    width: 20px; height: 20px; cursor: pointer; font-size: 12px; flex: none; line-height: 1;
-  }
-  .empty-list { font-size: 12px; color: #95A5B5; text-align: center; padding: 14px 4px; }
+  
+  .icon-btn { border: none; background: #F0F4FA; color: #4A5A6A; border-radius: 4px; width: 24px; height: 24px; cursor: pointer; font-size: 13px; flex: none; display: flex; align-items: center; justify-content: center; }
+  .icon-btn:hover { background: #E3EAF2; }
+  .icon-btn.del { background: #FCEAEA; color: #C0392B; }
+  .icon-btn.del:hover { background: #FAD4D4; }
 
+  .bld-row .meta { font-size: 10.5px; color: #8094A8; margin-bottom: 5px; }
   .warn-badge { color: #E74C3C; font-size: 10.5px; font-weight: 600; }
+  .empty-list { font-size: 12px; color: #95A5B5; text-align: center; padding: 14px 4px; }
 """
 
 _CANVAS_JS = """
 export default function(component) {
 const { data, parentElement, setStateValue } = component;
 
+// PREVENT STREAMLIT RERUN GLITCHES
+if (window.__canvas_initialized__) return;
+window.__canvas_initialized__ = true;
+
 // ─────────────────────────────────────────────────────────────
-// CONSTANTS / GEOMETRY DEFINITIONS
+// CONSTANTS & GEOMETRY MATH
 // ─────────────────────────────────────────────────────────────
 const WORLD_W = 200, WORLD_H = 130;
-const MIN_SIZE = 3;
-const SNAP = 0.5;
+const MIN_SIZE = 4;
+let SNAP = 1; // 1 = smooth, 5 = rigid grid
 
 function snap(v) { return Math.round(v / SNAP) * SNAP; }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
-// Boundary presets are ABSOLUTE world-coordinate point lists (not
-// normalized 0-1 + a box) since vertices are dragged independently and
-// there's no longer a single box that the whole shape scales against.
-// These are just *starting points* for the dropdown / sides-input reset —
-// every point is freely draggable afterward.
-const BOUNDARY_DEFAULT_CX = 90, BOUNDARY_DEFAULT_CY = 65;   // roughly centered in WORLD_W x WORLD_H
-const BOUNDARY_DEFAULT_R = 55;
+function getBBox(pts) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for(const [x,y] of pts) {
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+  }
+  return {minX, minY, maxX, maxY};
+}
 
+// Math rotation for points (allows accurate collision on rotated shapes)
+function rotatePt([px, py], cx, cy, deg) {
+  if (!deg) return [px, py];
+  const rad = deg * Math.PI / 180;
+  const cos = Math.cos(rad), sin = Math.sin(rad);
+  const dx = px - cx, dy = py - cy;
+  return [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos];
+}
+
+// Accurate Polygon Intersections (Separating Axis + Line Intersect)
+function pointInPolygon(px, py, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, yi] = pts[i], [xj, yj] = pts[j];
+    if ((yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+function segmentsIntersect(p1, p2, p3, p4) {
+  const ccw = (a, b, c) => (c[1]-a[1])*(b[0]-a[0]) > (b[1]-a[1])*(c[0]-a[0]);
+  return ccw(p1,p3,p4) !== ccw(p2,p3,p4) && ccw(p1,p2,p3) !== ccw(p1,p2,p4);
+}
+
+function polysOverlap(ptsA, ptsB) {
+  const bbA = getBBox(ptsA), bbB = getBBox(ptsB);
+  if (bbA.maxX < bbB.minX || bbA.minX > bbB.maxX || bbA.maxY < bbB.minY || bbA.minY > bbB.maxY) return false;
+  for (const p of ptsA) if (pointInPolygon(p[0], p[1], ptsB)) return true;
+  for (const p of ptsB) if (pointInPolygon(p[0], p[1], ptsA)) return true;
+  for (let i=0; i<ptsA.length; i++) {
+    for (let j=0; j<ptsB.length; j++) {
+      if (segmentsIntersect(ptsA[i], ptsA[(i+1)%ptsA.length], ptsB[j], ptsB[(j+1)%ptsB.length])) return true;
+    }
+  }
+  return false;
+}
+
+function shoelaceArea(pts) {
+  let s = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [x1, y1] = pts[i], [x2, y2] = pts[(i + 1) % pts.length];
+    s += x1 * y2 - x2 * y1;
+  }
+  return Math.abs(s) / 2;
+}
+
+// ─────────────────────────────────────────────────────────────
+// BOUNDARY PRESETS
+// ─────────────────────────────────────────────────────────────
+const BOUNDARY_DEFAULT_CX = 90, BOUNDARY_DEFAULT_CY = 65, BOUNDARY_DEFAULT_R = 55;
 function genNGon(n, cx, cy, r) {
-  // Evenly spaced N-sided polygon, point 0 at the top, going clockwise —
-  // used both for named presets that happen to be regular polygons and
-  // for the freeform "sides: N" regenerate.
   const pts = [];
   for (let i = 0; i < n; i++) {
     const a = -Math.PI / 2 + (2 * Math.PI * i) / n;
@@ -197,94 +222,39 @@ const BUILDING_SHAPES = {
   l_shape:   { norm: [[0,0],[1,0],[1,0.5],[0.5,0.5],[0.5,1],[0,1]], defW: 20, defH: 16, label: "L-Shape" },
   circle:    { norm: null,                                  defW: 14, defH: 14, label: "Circle"    },
 };
-
 const COLORS = ["#4A90D9", "#E07B39", "#6BBF59", "#9B59B6", "#16A085", "#D4AC0D", "#C0392B", "#7F8C8D"];
 
 // ─────────────────────────────────────────────────────────────
-// STATE  (seeded once from `data`, the Python-side layout passed in
-// at mount time — see loadState() below, which also migrates any
-// old-format save file the user might load)
+// STATE
 // ─────────────────────────────────────────────────────────────
-let STATE = { boundary: { preset: "rectangle", sides: 4, points: BOUNDARY_PRESETS.rectangle.map(p => [...p]) }, buildings: [] };
-let nextId = 1;
-let selected = null;        // { type: 'building', id } | { type: 'boundary' } | null
-let drag = null;            // active pointer drag info
-
+let STATE = { boundary: null, buildings: [] };
+let nextId = 1, selected = null, drag = null;
 const svg = parentElement.querySelector("#canvas");
-const bldListEl = parentElement.querySelector("#bldList");
-const statsRowEl = parentElement.querySelector("#statsRow");
-const boundarySelect = parentElement.querySelector("#boundarySelect");
-const boundarySidesInput = parentElement.querySelector("#boundarySides");
 
-// ─────────────────────────────────────────────────────────────
-// GEOMETRY HELPERS
-// ─────────────────────────────────────────────────────────────
 function scalePoints(norm, x, y, w, h) {
   return norm.map(([nx, ny]) => [x + nx * w, y + ny * h]);
 }
 function shapePoints(b) {
+  let pts;
   if (b.shape === "circle") {
-    const cx = b.x + b.w / 2, cy = b.y + b.h / 2, r = b.w / 2;
-    const n = 28, pts = [];
-    for (let i = 0; i < n; i++) {
-      const a = (2 * Math.PI * i) / n;
+    const cx = b.x + b.w/2, cy = b.y + b.h/2, r = b.w/2;
+    pts = [];
+    for (let i = 0; i < 28; i++) {
+      const a = (2 * Math.PI * i) / 28;
       pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
     }
-    return pts;
+  } else {
+    pts = scalePoints(BUILDING_SHAPES[b.shape].norm, b.x, b.y, b.w, b.h);
   }
-  return scalePoints(BUILDING_SHAPES[b.shape].norm, b.x, b.y, b.w, b.h);
-}
-function boundaryPoints(bnd) {
-  return bnd.points;
-}
-function polygonCentroid(pts) {
-  // Simple averaged centroid (not the area-weighted centroid) — good enough
-  // for "keep the shape roughly where it was" when regenerating vertex count.
-  let sx = 0, sy = 0;
-  for (const [x, y] of pts) { sx += x; sy += y; }
-  return [sx / pts.length, sy / pts.length];
-}
-function shoelaceArea(pts) {
-  let s = 0;
-  for (let i = 0; i < pts.length; i++) {
-    const [x1, y1] = pts[i], [x2, y2] = pts[(i + 1) % pts.length];
-    s += x1 * y2 - x2 * y1;
+  if (b.r) {
+    const cx = b.x + b.w/2, cy = b.y + b.h/2;
+    pts = pts.map(p => rotatePt(p, cx, cy, b.r));
   }
-  return Math.abs(s) / 2;
-}
-function pointInPolygon(px, py, pts) {
-  let inside = false;
-  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-    const [xi, yi] = pts[i], [xj, yj] = pts[j];
-    if ((yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) inside = !inside;
-  }
-  return inside;
-}
-function rectsOverlap(a, b) {
-  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
-}
-
-function screenToWorld(clientX, clientY) {
-  const pt = svg.createSVGPoint();
-  pt.x = clientX; pt.y = clientY;
-  const ctm = svg.getScreenCTM().inverse();
-  const p = pt.matrixTransform(ctm);
-  return [p.x, p.y];
-}
-
-function buildingInsideBoundary(b) {
-  const bp = boundaryPoints(STATE.boundary);
-  const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
-  return pointInPolygon(cx, cy, bp);
-}
-
-function buildingArea(b) {
-  if (b.shape === "circle") return Math.PI * (b.w / 2) * (b.w / 2);
-  return shoelaceArea(shapePoints(b));
+  return pts;
 }
 
 // ─────────────────────────────────────────────────────────────
-// SVG ELEMENT HELPERS
+// RENDER HELPERS
 // ─────────────────────────────────────────────────────────────
 const NS = "http://www.w3.org/2000/svg";
 function el(tag, attrs) {
@@ -294,396 +264,340 @@ function el(tag, attrs) {
 }
 function pointsToAttr(pts) { return pts.map(p => p.join(",")).join(" "); }
 
-function makeHandles(bbox, role, id) {
-  const [x0, y0, x1, y1] = bbox;
-  const corners = [["nw", x0, y0], ["ne", x1, y0], ["sw", x0, y1], ["se", x1, y1]];
+function makeHandles(b) {
+  const cx = b.x + b.w/2, cy = b.y + b.h/2;
   const group = el("g", {});
-  for (const [corner, cx, cy] of corners) {
-    const h = el("rect", {
-      x: cx - 2.6, y: cy - 2.6, width: 5.2, height: 5.2,
+  if (b.r) group.setAttribute("transform", `rotate(${b.r}, ${cx}, ${cy})`);
+  
+  // corner resize handles
+  const corners = [["nw", b.x, b.y], ["ne", b.x+b.w, b.y], ["sw", b.x, b.y+b.h], ["se", b.x+b.w, b.y+b.h]];
+  for (const [corner, px, py] of corners) {
+    if (b.shape === "circle" && corner !== "se") continue;
+    group.appendChild(el("rect", {
+      x: px - 2.6, y: py - 2.6, width: 5.2, height: 5.2,
       fill: "#fff", stroke: "#4A90D9", "stroke-width": 1,
-      "data-role": "handle", "data-target": role, "data-id": id || "", "data-corner": corner,
+      "data-role": "handle", "data-target": "resize", "data-id": b.id,
       style: `cursor:${corner}-resize`,
-    });
-    group.appendChild(h);
+    }));
   }
-  return group;
-}
-
-function makeVertexHandles(pts) {
-  // One draggable circular handle per boundary vertex — round, rather than
-  // the square corner-resize handles, so the two interaction styles read
-  // as visually distinct at a glance.
-  const group = el("g", {});
-  pts.forEach(([x, y], i) => {
-    const h = el("circle", {
-      cx: x, cy: y, r: 3,
-      fill: "#fff", stroke: "#4A90D9", "stroke-width": 1.4,
-      "data-role": "handle", "data-target": "boundary-vertex", "data-index": i,
-      style: "cursor:move",
-    });
-    group.appendChild(h);
-  });
+  
+  // rotation handle
+  group.appendChild(el("line", { x1: cx, y1: b.y, x2: cx, y2: b.y - 14, stroke: "#4A90D9", "stroke-width": 1, "stroke-dasharray": "2,2" }));
+  group.appendChild(el("circle", {
+    cx: cx, cy: b.y - 14, r: 3.5,
+    fill: "#4A90D9", stroke: "#fff", "stroke-width": 1,
+    "data-role": "handle", "data-target": "rotate", "data-id": b.id,
+    style: "cursor: crosshair",
+  }));
+  
   return group;
 }
 
 // ─────────────────────────────────────────────────────────────
-// RENDER
+// RENDER LOOP
 // ─────────────────────────────────────────────────────────────
 function render() {
   svg.innerHTML = "";
 
-  // grid background
   const defs = el("defs", {});
   const pattern = el("pattern", { id: "grid", width: 10, height: 10, patternUnits: "userSpaceOnUse" });
-  pattern.appendChild(el("path", { d: "M 10 0 L 0 0 0 10", fill: "none", stroke: "#EEF2F7", "stroke-width": 0.4 }));
+  pattern.appendChild(el("path", { d: "M 10 0 L 0 0 0 10", fill: "none", stroke: "#EEF2F7", "stroke-width": 0.5 }));
   defs.appendChild(pattern);
   svg.appendChild(defs);
   svg.appendChild(el("rect", { x: 0, y: 0, width: WORLD_W, height: WORLD_H, fill: "url(#grid)" }));
 
-  // boundary — selecting it shows one draggable handle per vertex; there's
-  // no separate "move the whole shape" mode, only per-vertex editing.
-  const bPts = boundaryPoints(STATE.boundary);
+  const bPts = STATE.boundary.points;
   const isBndSel = selected && selected.type === "boundary";
   svg.appendChild(el("polygon", {
     points: pointsToAttr(bPts), fill: "rgba(74,144,217,0.07)",
     stroke: isBndSel ? "#4A90D9" : "#9FB4CC", "stroke-width": isBndSel ? 2 : 1.3,
     "stroke-dasharray": "6,3", "data-role": "boundary",
   }));
+  
   if (isBndSel) {
-    svg.appendChild(makeVertexHandles(bPts));
+    const vg = el("g", {});
+    bPts.forEach(([x, y], i) => {
+      vg.appendChild(el("circle", {
+        cx: x, cy: y, r: 3.5, fill: "#fff", stroke: "#4A90D9", "stroke-width": 1.4,
+        "data-role": "handle", "data-target": "boundary-vertex", "data-index": i, style: "cursor:move",
+      }));
+    });
+    svg.appendChild(vg);
   }
 
-  // buildings
   STATE.buildings.forEach((b, idx) => {
     const pts = shapePoints(b);
-    const inside = buildingInsideBoundary(b);
-    const overlapping = STATE.buildings.some((o, j) => j !== idx && rectsOverlap(b, o));
+    const inside = pts.every(p => pointInPolygon(p[0], p[1], bPts));
+    const overlapping = STATE.buildings.some((o, j) => j !== idx && polysOverlap(pts, shapePoints(o)));
     const isSel = selected && selected.type === "building" && selected.id === b.id;
 
     const g = el("g", { "data-role": "building", "data-id": b.id, style: "cursor:move" });
-    const poly = el("polygon", {
+    g.appendChild(el("polygon", {
       points: pointsToAttr(pts),
-      fill: b.color, "fill-opacity": isSel ? 0.85 : 0.6,
+      fill: b.color, "fill-opacity": isSel ? 0.9 : 0.6,
       stroke: (!inside || overlapping) ? "#E74C3C" : b.color,
       "stroke-width": isSel ? 2.4 : 1.4,
       "stroke-dasharray": (!inside || overlapping) ? "4,2" : "none",
-    });
-    g.appendChild(poly);
+    }));
 
-    const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+    const cx = b.x + b.w/2, cy = b.y + b.h/2;
     const label = el("text", {
       x: cx, y: cy, "text-anchor": "middle", "dominant-baseline": "middle",
       "font-size": 5.4, fill: "#1F2D3D", "pointer-events": "none",
     });
+    if (b.r) label.setAttribute("transform", `rotate(${b.r}, ${cx}, ${cy})`);
     label.textContent = b.name;
     g.appendChild(label);
 
     if (!inside || overlapping) {
-      const warn = el("text", { x: b.x, y: b.y - 1.5, "font-size": 6, "pointer-events": "none" });
+      const warn = el("text", { x: getBBox(pts).minX, y: getBBox(pts).minY - 1.5, "font-size": 6, "pointer-events": "none" });
       warn.textContent = "\u26A0";
       g.appendChild(warn);
     }
-
+    
     svg.appendChild(g);
-    if (isSel) {
-      const bb = [b.x, b.y, b.x + b.w, b.y + b.h];
-      const handleGroup = makeHandles(bb, "building", b.id);
-      if (b.shape === "circle") {
-        // only the se handle is meaningful for circles (uniform radius)
-        [...handleGroup.children].forEach(h => {
-          if (h.getAttribute("data-corner") !== "se") h.style.display = "none";
-        });
-      }
-      svg.appendChild(handleGroup);
-    }
+    if (isSel) svg.appendChild(makeHandles(b));
   });
 
   renderSidePanel();
 }
 
 function renderSidePanel() {
-  // stats
-  const siteArea = shoelaceArea(boundaryPoints(STATE.boundary));
-  const builtArea = STATE.buildings.reduce((s, b) => s + buildingArea(b), 0);
-  const pct = siteArea > 0 ? (builtArea / siteArea) * 100 : 0;
-  statsRowEl.innerHTML = `
+  const siteArea = shoelaceArea(STATE.boundary.points);
+  const builtArea = STATE.buildings.reduce((s, b) => s + (b.shape==="circle"?Math.PI*(b.w/2)*(b.w/2):shoelaceArea(shapePoints(b))), 0);
+  
+  parentElement.querySelector("#statsRow").innerHTML = `
     <div class="stat">Site area<b>${siteArea.toFixed(0)} m&sup2;</b></div>
     <div class="stat">Built area<b>${builtArea.toFixed(0)} m&sup2;</b></div>
-    <div class="stat">Utilisation<b>${pct.toFixed(1)}%</b></div>
+    <div class="stat">Utilisation<b>${siteArea>0?((builtArea/siteArea)*100).toFixed(1):0}%</b></div>
   `;
 
-  // building list
+  const bldListEl = parentElement.querySelector("#bldList");
   bldListEl.innerHTML = "";
   if (STATE.buildings.length === 0) {
-    bldListEl.innerHTML = '<div class="empty-list">No buildings yet —<br/>drag a shape onto the site.</div>';
+    bldListEl.innerHTML = '<div class="empty-list">No shapes yet.</div>';
     return;
   }
+  
   STATE.buildings.forEach(b => {
-    const inside = buildingInsideBoundary(b);
     const row = document.createElement("div");
     row.className = "bld-row" + (selected && selected.type === "building" && selected.id === b.id ? " selected" : "");
-    row.addEventListener("pointerdown", () => { selected = { type: "building", id: b.id }; render(); });
+    row.addEventListener("pointerdown", () => {
+      // Bring to front on select
+      STATE.buildings = STATE.buildings.filter(x => x.id !== b.id);
+      STATE.buildings.push(b);
+      selected = { type: "building", id: b.id };
+      render();
+    });
 
     const top = document.createElement("div");
     top.className = "top";
-    const sw = document.createElement("div");
-    sw.className = "swatch"; sw.style.background = b.color;
-    const nameInput = document.createElement("input");
-    nameInput.type = "text"; nameInput.value = b.name;
-    nameInput.addEventListener("input", e => { b.name = e.target.value; });
-    nameInput.addEventListener("change", () => { render(); syncToPython(); });
-    const delBtn = document.createElement("button");
-    delBtn.className = "del-btn"; delBtn.textContent = "\u2715";
-    delBtn.addEventListener("click", (e) => {
+    
+    const cp = document.createElement("input");
+    cp.type = "color"; cp.className = "color-picker"; cp.value = b.color;
+    cp.addEventListener("input", e => { b.color = e.target.value; render(); });
+    cp.addEventListener("change", () => syncToPython());
+    
+    const ni = document.createElement("input");
+    ni.type = "text"; ni.value = b.name;
+    ni.addEventListener("input", e => b.name = e.target.value);
+    ni.addEventListener("change", () => { render(); syncToPython(); });
+    
+    const dupBtn = document.createElement("button");
+    dupBtn.className = "icon-btn"; dupBtn.title = "Duplicate"; dupBtn.innerHTML = "&#10697;";
+    dupBtn.addEventListener("click", e => {
       e.stopPropagation();
-      STATE.buildings = STATE.buildings.filter(x => x.id !== b.id);
-      if (selected && selected.type === "building" && selected.id === b.id) selected = null;
+      const copy = JSON.parse(JSON.stringify(b));
+      copy.id = nextId++; copy.x += 5; copy.y += 5; copy.name += " (Copy)";
+      STATE.buildings.push(copy);
+      selected = { type: "building", id: copy.id };
       render(); syncToPython();
     });
-    top.appendChild(sw); top.appendChild(nameInput); top.appendChild(delBtn);
-
+    
+    const delBtn = document.createElement("button");
+    delBtn.className = "icon-btn del"; delBtn.title = "Delete"; delBtn.innerHTML = "&#10005;";
+    delBtn.addEventListener("click", e => {
+      e.stopPropagation();
+      STATE.buildings = STATE.buildings.filter(x => x.id !== b.id);
+      if (selected && selected.id === b.id) selected = null;
+      render(); syncToPython();
+    });
+    
+    top.appendChild(cp); top.appendChild(ni); top.appendChild(dupBtn); top.appendChild(delBtn);
+    
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.innerHTML = `${BUILDING_SHAPES[b.shape].label} &middot; ${buildingArea(b).toFixed(1)} m&sup2;` +
-      (inside ? "" : ' &middot; <span class="warn-badge">outside boundary</span>');
+    meta.innerHTML = `${BUILDING_SHAPES[b.shape].label} &middot; ${b.r||0}&deg; rotation`;
 
-    const threshRow = document.createElement("div");
-    threshRow.className = "thresh-row";
-    const tLabel = document.createElement("label");
-    tLabel.textContent = "Threshold:";
-    const tInput = document.createElement("input");
-    tInput.type = "number"; tInput.step = "any"; tInput.value = b.threshold;
-    tInput.addEventListener("input", e => { b.threshold = e.target.value; });
-    tInput.addEventListener("change", () => { syncToPython(); });
-    threshRow.appendChild(tLabel); threshRow.appendChild(tInput);
-
-    row.appendChild(top); row.appendChild(meta); row.appendChild(threshRow);
+    row.appendChild(top); row.appendChild(meta);
     bldListEl.appendChild(row);
   });
 }
 
-// ─────────────────────────────────────────────────────────────
-// SYNC TO PYTHON  (only on discrete events — never mid-drag)
-// ─────────────────────────────────────────────────────────────
 function syncToPython() {
-  const siteArea = shoelaceArea(boundaryPoints(STATE.boundary));
-  const builtArea = STATE.buildings.reduce((s, b) => s + buildingArea(b), 0);
+  const siteArea = shoelaceArea(STATE.boundary.points);
+  const builtArea = STATE.buildings.reduce((s, b) => s + (b.shape==="circle"?Math.PI*(b.w/2)*(b.w/2):shoelaceArea(shapePoints(b))), 0);
   setStateValue("layout", {
-    boundary: STATE.boundary,
-    buildings: STATE.buildings,
-    site_area: siteArea,
-    built_area: builtArea,
+    boundary: STATE.boundary, buildings: STATE.buildings,
+    site_area: siteArea, built_area: builtArea,
     utilization_pct: siteArea > 0 ? (builtArea / siteArea) * 100 : 0,
   });
 }
 
 // ─────────────────────────────────────────────────────────────
-// ADD BUILDING
+// TOOLBAR & INTERACTION
 // ─────────────────────────────────────────────────────────────
+parentElement.querySelector("#snapGrid").addEventListener("change", e => { SNAP = e.target.checked ? 5 : 1; });
+parentElement.querySelector("#clearBtn").addEventListener("click", () => {
+  if(confirm("Clear all shapes?")) { STATE.buildings = []; selected = null; render(); syncToPython(); }
+});
+
 function addBuilding(shape, worldX, worldY) {
   const def = BUILDING_SHAPES[shape];
-  const w = def.defW, h = def.defH;
-  const x = worldX !== undefined ? snap(worldX - w / 2) : snap(20 + (STATE.buildings.length % 5) * 4);
-  const y = worldY !== undefined ? snap(worldY - h / 2) : snap(20 + (STATE.buildings.length % 5) * 4);
+  const x = worldX !== undefined ? snap(worldX - def.defW/2) : snap(20 + (STATE.buildings.length % 5)*4);
+  const y = worldY !== undefined ? snap(worldY - def.defH/2) : snap(20 + (STATE.buildings.length % 5)*4);
   const b = {
-    id: nextId++,
-    shape, x: clamp(x, 0, WORLD_W - w), y: clamp(y, 0, WORLD_H - h), w, h,
+    id: nextId++, shape, x, y, w: def.defW, h: def.defH, r: 0,
     name: `${def.label} ${STATE.buildings.length + 1}`,
-    threshold: 0,
     color: COLORS[STATE.buildings.length % COLORS.length],
   };
   STATE.buildings.push(b);
   selected = { type: "building", id: b.id };
-  render();
-  syncToPython();
+  render(); syncToPython();
 }
 
-// palette: click-to-add
-parentElement.querySelectorAll(".shape-btn").forEach(btn => {
+parentElement.querySelectorAll(".shape-btn[data-shape]").forEach(btn => {
   btn.addEventListener("click", () => addBuilding(btn.dataset.shape));
-  btn.addEventListener("dragstart", e => {
-    e.dataTransfer.setData("text/plain", btn.dataset.shape);
-    e.dataTransfer.effectAllowed = "copy";
-  });
+  btn.addEventListener("dragstart", e => { e.dataTransfer.setData("text", btn.dataset.shape); });
 });
-svg.addEventListener("dragover", e => { e.preventDefault(); });
+svg.addEventListener("dragover", e => e.preventDefault());
 svg.addEventListener("drop", e => {
   e.preventDefault();
-  const shape = e.dataTransfer.getData("text/plain");
+  const shape = e.dataTransfer.getData("text");
   if (!BUILDING_SHAPES[shape]) return;
-  const [wx, wy] = screenToWorld(e.clientX, e.clientY);
-  addBuilding(shape, wx, wy);
+  const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+  const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+  addBuilding(shape, p.x, p.y);
 });
 
-// boundary preset selector
-boundarySelect.addEventListener("change", () => {
-  const preset = boundarySelect.value;
-  const shape = BOUNDARY_PRESETS[preset];
-  STATE.boundary = { preset, sides: shape.length, points: shape.map(p => [...p]) };
-  boundarySidesInput.value = shape.length;
-  render();
-  syncToPython();
+const bSel = parentElement.querySelector("#boundarySelect");
+const bSides = parentElement.querySelector("#boundarySides");
+bSel.addEventListener("change", () => {
+  const p = bSel.value;
+  STATE.boundary = { preset: p, sides: BOUNDARY_PRESETS[p].length, points: BOUNDARY_PRESETS[p].map(x => [...x]) };
+  bSides.value = STATE.boundary.sides;
+  render(); syncToPython();
+});
+bSides.addEventListener("change", () => {
+  let n = clamp(Math.round(Number(bSides.value))||4, 3, 20);
+  bSides.value = n;
+  let sx=0, sy=0; STATE.boundary.points.forEach(p => { sx+=p[0]; sy+=p[1]; });
+  STATE.boundary = { preset: "custom", sides: n, points: genNGon(n, sx/STATE.boundary.points.length, sy/STATE.boundary.points.length, BOUNDARY_DEFAULT_R) };
+  render(); syncToPython();
 });
 
-boundarySidesInput.addEventListener("change", () => {
-  let n = Math.round(Number(boundarySidesInput.value));
-  if (!Number.isFinite(n)) n = STATE.boundary.points.length;
-  n = clamp(n, 3, 20);
-  boundarySidesInput.value = n;
-
-  // Regenerate around the boundary's current centroid (and a radius derived
-  // from its current extent) so changing the side count doesn't relocate or
-  // wildly resize a shape the user already dragged into place.
-  const [cx, cy] = polygonCentroid(STATE.boundary.points);
-  const xs = STATE.boundary.points.map(p => p[0]), ys = STATE.boundary.points.map(p => p[1]);
-  const r = Math.max(10, (Math.max(...xs) - Math.min(...xs) + Math.max(...ys) - Math.min(...ys)) / 4);
-
-  STATE.boundary = { preset: "custom", sides: n, points: genNGon(n, cx, cy, r) };
-  render();
-  syncToPython();
-});
-
-// ─────────────────────────────────────────────────────────────
-// POINTER INTERACTION (move + resize), via native hit-testing
-// ─────────────────────────────────────────────────────────────
+// POINTER EVENTS
 svg.addEventListener("pointerdown", e => {
   const target = e.target.closest("[data-role]");
-  const [wx, wy] = screenToWorld(e.clientX, e.clientY);
+  const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+  const p = pt.matrixTransform(svg.getScreenCTM().inverse());
 
   if (!target) { selected = null; render(); return; }
   const role = target.getAttribute("data-role");
 
   if (role === "handle") {
-    const targetType = target.getAttribute("data-target");
-
-    if (targetType === "boundary-vertex") {
-      const index = Number(target.getAttribute("data-index"));
+    const tType = target.getAttribute("data-target");
+    if (tType === "boundary-vertex") {
       selected = { type: "boundary" };
-      drag = { mode: "vertex", index };
-      svg.setPointerCapture(e.pointerId);
-      return;
+      drag = { mode: "vertex", index: Number(target.getAttribute("data-index")) };
+    } else {
+      const obj = STATE.buildings.find(b => String(b.id) === target.getAttribute("data-id"));
+      if (!obj) return;
+      if (tType === "rotate") {
+        drag = { mode: "rotate", obj };
+      } else {
+        // For accurate symmetric resize, grab the CTM of the rotated handle group
+        drag = { mode: "resize", obj, isCircle: obj.shape==="circle", ctm: target.closest('g').getScreenCTM().inverse() };
+      }
     }
-
-    const corner = target.getAttribute("data-corner");
-    const id = target.getAttribute("data-id");
-    const obj = STATE.buildings.find(b => String(b.id) === id);
-    if (!obj) return;
-    drag = { mode: "resize", obj, corner, isCircle: obj.shape === "circle" };
     svg.setPointerCapture(e.pointerId);
     return;
   }
-
+  
   if (role === "building") {
     const id = Number(target.getAttribute("data-id"));
     const b = STATE.buildings.find(x => x.id === id);
     if (!b) return;
+    STATE.buildings = STATE.buildings.filter(x => x.id !== id);
+    STATE.buildings.push(b);
     selected = { type: "building", id };
-    drag = { mode: "move", obj: b, offX: wx - b.x, offY: wy - b.y };
+    drag = { mode: "move", obj: b, offX: p.x - b.x, offY: p.y - b.y };
     svg.setPointerCapture(e.pointerId);
-    render();
-    return;
+    render(); return;
   }
-
-  if (role === "boundary") {
-    // Clicking the boundary fill selects it (shows vertex handles) but, per
-    // design, doesn't drag the whole shape — only individual vertices move.
-    selected = { type: "boundary" };
-    render();
-    return;
-  }
+  
+  if (role === "boundary") { selected = { type: "boundary" }; render(); }
 });
 
 svg.addEventListener("pointermove", e => {
   if (!drag) return;
-  const [wx, wy] = screenToWorld(e.clientX, e.clientY);
-  const obj = drag.obj;
+  const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+  const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+  const wx = p.x, wy = p.y, obj = drag.obj;
 
   if (drag.mode === "vertex") {
-    const nx = clamp(snap(wx), -WORLD_W * 0.3, WORLD_W * 1.3);
-    const ny = clamp(snap(wy), -WORLD_H * 0.3, WORLD_H * 1.3);
-    STATE.boundary.points[drag.index] = [nx, ny];
-    render();
+    STATE.boundary.points[drag.index] = [clamp(snap(wx), -WORLD_W, WORLD_W*2), clamp(snap(wy), -WORLD_H, WORLD_H*2)];
   } else if (drag.mode === "move") {
-    obj.x = clamp(snap(wx - drag.offX), -WORLD_W * 0.3, WORLD_W * 1.3);
-    obj.y = clamp(snap(wy - drag.offY), -WORLD_H * 0.3, WORLD_H * 1.3);
-    render();
+    obj.x = clamp(snap(wx - drag.offX), -WORLD_W, WORLD_W*2);
+    obj.y = clamp(snap(wy - drag.offY), -WORLD_H, WORLD_H*2);
+  } else if (drag.mode === "rotate") {
+    const cx = obj.x + obj.w/2, cy = obj.y + obj.h/2;
+    let deg = (Math.atan2(wy - cy, wx - cx) * 180 / Math.PI) + 90;
+    if (e.shiftKey) deg = Math.round(deg/15)*15; // Shift to snap 15 deg
+    else deg = Math.round(deg/5)*5; // Standard 5 deg snap
+    obj.r = (deg % 360 + 360) % 360;
   } else if (drag.mode === "resize") {
+    // Symmetrical resize using the local coordinate matrix
+    const localP = pt.matrixTransform(drag.ctm);
+    const cx = obj.x + obj.w/2, cy = obj.y + obj.h/2;
     if (drag.isCircle) {
-      const cx = obj.x + obj.w / 2, cy = obj.y + obj.h / 2;
-      const r = Math.max(MIN_SIZE / 2, Math.hypot(wx - cx, wy - cy));
+      const r = Math.max(MIN_SIZE/2, Math.hypot(localP.x - cx, localP.y - cy));
       obj.w = obj.h = snap(r * 2);
-      obj.x = cx - obj.w / 2; obj.y = cy - obj.h / 2;
     } else {
-      let x0 = obj.x, y0 = obj.y, x1 = obj.x + obj.w, y1 = obj.y + obj.h;
-      const c = drag.corner;
-      if (c.includes("w")) x0 = Math.min(snap(wx), x1 - MIN_SIZE);
-      if (c.includes("e")) x1 = Math.max(snap(wx), x0 + MIN_SIZE);
-      if (c.includes("n")) y0 = Math.min(snap(wy), y1 - MIN_SIZE);
-      if (c.includes("s")) y1 = Math.max(snap(wy), y0 + MIN_SIZE);
-      obj.x = x0; obj.y = y0; obj.w = x1 - x0; obj.h = y1 - y0;
+      obj.w = snap(Math.max(MIN_SIZE, Math.abs(localP.x - cx) * 2));
+      obj.h = snap(Math.max(MIN_SIZE, Math.abs(localP.y - cy) * 2));
     }
-    render();
+    obj.x = cx - obj.w/2; obj.y = cy - obj.h/2;
   }
+  render();
 });
 
 function endDrag(e) {
   if (!drag) return;
   drag = null;
-  try { svg.releasePointerCapture(e.pointerId); } catch (err) {}
+  try { svg.releasePointerCapture(e.pointerId); } catch(e){}
   syncToPython();
 }
 svg.addEventListener("pointerup", endDrag);
 svg.addEventListener("pointercancel", endDrag);
 
 // ─────────────────────────────────────────────────────────────
-// LOAD INITIAL STATE  (from `data`, passed in once at mount time;
-// reloads/resets from Python work by remounting with a new `key`,
-// not by pushing updates into an already-mounted instance — see
-// app.py, which bumps a version counter into the component key)
+// INITIALIZATION
 // ─────────────────────────────────────────────────────────────
 function loadState(raw) {
-  let s = raw ? JSON.parse(JSON.stringify(raw)) : null;
-
-  if (!s || !s.boundary) {
-    s = s || {};
-    s.boundary = { preset: "rectangle", sides: 4, points: BOUNDARY_PRESETS.rectangle.map(p => [...p]) };
-  } else if (!Array.isArray(s.boundary.points)) {
-    // Migrate a save file from the previous version of this app, which
-    // stored { preset, x, y, w, h } and re-derived points from a fixed
-    // normalized shape at render time. Re-derive them once here instead.
-    const preset = s.boundary.preset && BOUNDARY_PRESETS[s.boundary.preset]
-      ? s.boundary.preset : "rectangle";
-    const { x = 15, y = 15, w = 150, h = 95 } = s.boundary;
-    const OLD_NORM = {
-      rectangle: [[0,0],[1,0],[1,1],[0,1]],
-      l_shape:   [[0,0],[1,0],[1,0.5],[0.5,0.5],[0.5,1],[0,1]],
-      pentagon:  [[0.5,0],[1,0.38],[0.81,1],[0.19,1],[0,0.38]],
-      hexagon:   [[0.25,0],[0.75,0],[1,0.5],[0.75,1],[0.25,1],[0,0.5]],
-      trapezoid: [[0.18,0],[0.82,0],[1,1],[0,1]],
-    };
-    const pts = OLD_NORM[preset].map(([nx, ny]) => [snap(x + nx * w), snap(y + ny * h)]);
-    s.boundary = { preset, sides: pts.length, points: pts };
-  }
-  if (!s.boundary.sides) s.boundary.sides = s.boundary.points.length;
+  let s = raw ? JSON.parse(JSON.stringify(raw)) : {};
+  if (!s.boundary) s.boundary = { preset: "rectangle", sides: 4, points: BOUNDARY_PRESETS.rectangle.map(p => [...p]) };
   if (!s.buildings) s.buildings = [];
-
   STATE = s;
   nextId = STATE.buildings.reduce((m, b) => Math.max(m, b.id + 1), 1);
   selected = null;
 }
 
 loadState(data);
-boundarySelect.value = STATE.boundary.preset;
-boundarySidesInput.value = STATE.boundary.sides;
+bSel.value = STATE.boundary.preset;
+bSides.value = STATE.boundary.sides;
 render();
-
-// Echo the freshly-loaded state straight back to Python only if it doesn't
-// already contain the calculated metrics. This prevents an infinite rerun loop.
-if (!data || data.site_area === undefined) {
-  syncToPython();
-}
-
+if (!data || data.site_area === undefined) syncToPython();
 }
 """
 
@@ -694,12 +608,7 @@ _site_canvas = st.components.v2.component(
     js=_CANVAS_JS,
 )
 
-
 def site_canvas(initial_state: dict, version: int):
-    # `key` includes `version` so that bumping version (on reset/load) forces
-    # Streamlit to remount the component with the freshly-passed `data`,
-    # rather than reusing an already-mounted instance that already consumed
-    # its initial data at first mount.
     return _site_canvas(
         data=initial_state,
         default={"layout": initial_state},
@@ -708,9 +617,8 @@ def site_canvas(initial_state: dict, version: int):
         on_layout_change=lambda: None,
     )
 
-
 # ─────────────────────────────────────────────────────────────
-# DEFAULT STATE
+# DEFAULT STATE & PYTHON LAYOUT
 # ─────────────────────────────────────────────────────────────
 DEFAULT_STATE = {
     "boundary": {
@@ -724,25 +632,16 @@ DEFAULT_STATE = {
     "utilization_pct": 0.0,
 }
 
+if "site_state" not in st.session_state:
+    st.session_state.site_state = copy.deepcopy(DEFAULT_STATE)
+if "version" not in st.session_state:
+    st.session_state.version = 1
+if "_last_upload_id" not in st.session_state:
+    st.session_state._last_upload_id = None
 
-def _init_state():
-    if "site_state" not in st.session_state:
-        st.session_state.site_state = copy.deepcopy(DEFAULT_STATE)
-    if "version" not in st.session_state:
-        st.session_state.version = 1
-    if "_last_upload_id" not in st.session_state:
-        st.session_state._last_upload_id = None
-
-
-_init_state()
-
-# ─────────────────────────────────────────────────────────────
-# SIDEBAR (part 1): load / reset — these must run *before* the canvas
-# call below, so a version bump takes effect in the same click.
-# ─────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 🏗️ Site Planner")
-    st.caption("Drag shapes onto the canvas to build your layout.")
+    st.caption("Drag shapes to build your layout.")
     st.divider()
 
     uploaded = st.file_uploader("📂 Load layout (JSON)", type="json")
@@ -755,19 +654,14 @@ with st.sidebar:
                     st.session_state.site_state = loaded
                     st.session_state.version += 1
                     st.session_state._last_upload_id = upload_id
-                else:
-                    st.error("That JSON doesn't look like a site layout.")
-            except Exception as e:
-                st.error(f"Couldn't read that file: {e}")
+            except Exception:
+                pass
 
     if st.button("🔄 Reset layout", use_container_width=True):
         st.session_state.site_state = copy.deepcopy(DEFAULT_STATE)
         st.session_state.version += 1
         st.session_state._last_upload_id = None
 
-# ─────────────────────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────────────────────
 st.markdown("## 🏗️ Construction Site Planner")
 
 result = site_canvas(
@@ -777,29 +671,7 @@ result = site_canvas(
 if result is not None and result.get("layout") is not None:
     st.session_state.site_state = result["layout"]
 
-# ─────────────────────────────────────────────────────────────
-# SIDEBAR (part 2): download — placed *after* the canvas call above
-# so it always packages the freshest state, never a stale one.
-# ─────────────────────────────────────────────────────────────
 with st.sidebar:
     st.divider()
     st.download_button(
-        "💾 Download layout (JSON)",
-        data=json.dumps(st.session_state.site_state, indent=2),
-        file_name="site_layout.json",
-        mime="application/json",
-        use_container_width=True,
-    )
-
-# ── Summary metrics (derived straight from what the component sent back) ──
-state = st.session_state.site_state
-site_area = state.get("site_area")
-built_area = state.get("built_area")
-util_pct = state.get("utilization_pct")
-
-if site_area is not None:
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Site area", f"{site_area:.0f} m²")
-    c2.metric("Built area", f"{built_area:.0f} m²")
-    c3.metric("Utilisation", f"{util_pct:.1f}%")
-    c4.metric("Buildings", f"{len(state.get('buildings', []))}")
+        "
