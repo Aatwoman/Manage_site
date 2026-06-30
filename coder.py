@@ -1,1562 +1,800 @@
 """
-Construction Site Planner  ·  v3.0
+Construction Site Planner  ·  v5.0 (single-file, Custom Components v2)
 ─────────────────────────────────────────────────────────────────────────────
-Features:
-  • Shapes  – Rectangle, L-Shape, T-Shape, Hexagon, Circle, Semicircle,
-               Road (polyline + width), Custom Polygon
-  • Interactive HTML canvas – drag structures to move, drag corner handles
-                              to resize, pan with middle-mouse or pan mode
-  • Boundary editor – draw/drag vertices, freehand, smooth, pan/zoom
-  • Safety clearance + boundary setback (configurable)
-  • Snap-to-grid, rotation per structure
-  • Space-utilisation panel
-  • JSON export / import
+Everything — Python, HTML, CSS, and JS — lives in this one file. No separate
+components/canvas/index.html, no folder structure to get right when
+deploying: just this file plus requirements.txt at the root of your repo.
+
+This uses Streamlit's Custom Components v2 API (st.components.v2.component,
+added in Streamlit 1.51), which accepts raw HTML/CSS/JS as Python strings
+directly — no declare_component(path=...) pointing at a file on disk, and no
+hand-rolled postMessage protocol. Communication with Python is native to the
+API: the JS side calls setStateValue("layout", {...}) whenever an edit
+commits (a drag ends, a dropdown changes, etc.), and Python reads it back via
+result.layout after the component call. This is the same officially
+supported, reliable approach as before — just inlined instead of split
+across files.
+
+One v2-specific design note: a v2 component receives its `data` only once,
+at mount time. Updating `data` on a later Streamlit rerun does not push new
+values into an already-mounted instance — to force a fresh load (e.g. after
+"Reset" or after uploading a saved JSON layout), this app bumps a `version`
+counter and folds it into the component's `key`, which forces v2 to remount
+the component with the new data. Ongoing edits within a single mount
+(dragging, typing) flow back to Python via setStateValue/result.layout as
+normal and don't need a remount.
 ─────────────────────────────────────────────────────────────────────────────
 """
 
-from __future__ import annotations
-
 import json
-import math
-import uuid
-from typing import Optional
+import copy
 
-import numpy as np
-import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
-from shapely.affinity import rotate as sh_rotate
-from shapely.geometry import LineString, Point, Polygon
-from shapely.ops import unary_union
 
 # ─────────────────────────────────────────────────────────────
 # PAGE CONFIG
 # ─────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Site Planner",
-    page_icon="🏗️",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-st.markdown("""
-<style>
-section[data-testid="stSidebar"] { background: #1E2A38 !important; }
-section[data-testid="stSidebar"] label,
-section[data-testid="stSidebar"] p,
-section[data-testid="stSidebar"] span,
-section[data-testid="stSidebar"] small { color: #C5D4E3 !important; }
-section[data-testid="stSidebar"] h1,
-section[data-testid="stSidebar"] h2,
-section[data-testid="stSidebar"] h3 { color: #FFFFFF !important; }
-section[data-testid="stSidebar"] [data-testid="stMetricValue"] {
-    color: #FFFFFF !important; font-size: 1.3rem !important; }
-section[data-testid="stSidebar"] [data-testid="stMetricLabel"] { color: #8BAACC !important; }
-div[data-testid="stMetric"] {
-    background: #F0F4FA; border-radius: 10px;
-    padding: 10px 14px 8px; border-left: 4px solid #4A90D9; }
-.block-container { padding-top: 1rem !important; }
-div[data-testid="stHorizontalBlock"] button {
-    border-radius: 8px !important; font-weight: 600 !important; }
-</style>
-""", unsafe_allow_html=True)
+st.set_page_config(page_title="Site Planner", page_icon="🏗️", layout="wide")
 
 # ─────────────────────────────────────────────────────────────
-# CONSTANTS
+# CANVAS COMPONENT — HTML / CSS / JS, inlined as plain strings
 # ─────────────────────────────────────────────────────────────
-CATEGORY_COLORS: dict[str, str] = {
-    "Office / Admin":    "#4A90D9",
-    "Warehouse":         "#E07B39",
-    "Workshop / Lab":    "#6BBF59",
-    "Storage Yard":      "#9B59B6",
-    "Utility / Plant":   "#F1C40F",
-    "Access Road":       "#7F8C8D",
-    "Green / Landscape": "#27AE60",
-    "Custom":            "#E74C3C",
-}
-
-SHAPE_TYPES = [
-    "Rectangle", "L-Shape", "T-Shape",
-    "Hexagon", "Circle", "Semicircle",
-    "Road", "Custom Polygon",
-]
-
-DEFAULT_BOUNDARY: list[tuple[float, float]] = [
-    (0, 0), (100, 0), (110, 35), (100, 80), (55, 85), (0, 60),
-]
-
-CIRCLE_SEGMENTS = 48
+_CANVAS_HTML = """
 
 
-# ─────────────────────────────────────────────────────────────
-# COLOUR UTILITIES
-# ─────────────────────────────────────────────────────────────
-def hex_to_rgba(hex_color: str, alpha: float = 1.0) -> str:
-    h = hex_color.lstrip("#")
-    if len(h) == 3:
-        h = "".join(c * 2 for c in h)
-    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
-    return f"rgba({r},{g},{b},{alpha})"
+  <div id="toolbar">
+    <div class="group">
+      <label>Add building (drag onto site):</label>
+      <button class="shape-btn" draggable="true" data-shape="rectangle"><span class="shape-icon">&#9646;</span>Rectangle</button>
+      <button class="shape-btn" draggable="true" data-shape="circle"><span class="shape-icon">&#9679;</span>Circle</button>
+      <button class="shape-btn" draggable="true" data-shape="triangle"><span class="shape-icon">&#9650;</span>Triangle</button>
+      <button class="shape-btn" draggable="true" data-shape="l_shape"><span class="shape-icon">&#8990;</span>L-Shape</button>
+    </div>
+    <div class="group">
+      <label>Site boundary:</label>
+      <select id="boundarySelect">
+        <option value="rectangle">Rectangle</option>
+        <option value="l_shape">L-Shape</option>
+        <option value="pentagon">Pentagon</option>
+        <option value="hexagon">Hexagon</option>
+        <option value="trapezoid">Trapezoid</option>
+      </select>
+    </div>
+    <div class="group">
+      <label>Sides:</label>
+      <input type="number" id="boundarySides" min="3" max="20" step="1" style="width:54px" />
+    </div>
+  </div>
+  <div class="hint">Drag a shape onto the site to add it (or click it). Drag a building to move it; drag a corner square to resize it. Click the boundary to select it, then drag any vertex (small circle) to reshape it — change "Sides" to regenerate it with a different number of vertices. Click empty space to deselect.</div>
 
+  <div id="main">
+    <div id="canvasWrap">
+      <svg id="canvas" viewBox="0 0 200 130" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div id="side">
+      <h4>Site stats</h4>
+      <div class="stats-row" id="statsRow"></div>
+      <h4>Buildings</h4>
+      <div id="bldList"></div>
+    </div>
+  </div>
 
-# ─────────────────────────────────────────────────────────────
-# SESSION-STATE BOOTSTRAP
-# ─────────────────────────────────────────────────────────────
-def _init() -> None:
-    defaults: dict = {
-        "buildings":          {},
-        "site_vertices":      list(DEFAULT_BOUNDARY),
-        "safety_margin":      2.0,
-        "boundary_threshold": 1.5,
-        "selected_id":        None,
-        "edit_mode":          "view",
-        "show_safety_zones":  True,
-        "show_utilisation":   True,
-        "snap_grid":          1.0,
-        # canvas ↔ streamlit sync
-        "canvas_cmd":         "",   # JSON command string sent TO the canvas
-        "canvas_event":       "",   # JSON event string received FROM the canvas
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+"""
 
+_CANVAS_CSS = """
 
-_init()
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; font-family: -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+  body { padding: 10px; background: #F7F9FC; color: #1F2D3D; }
 
+  #toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-bottom: 8px; }
+  .group { display: flex; align-items: center; gap: 6px; }
+  .group label { font-size: 12px; font-weight: 600; color: #4A5A6A; }
 
-# ─────────────────────────────────────────────────────────────
-# GEOMETRY HELPERS
-# ─────────────────────────────────────────────────────────────
-def _circle_pts(cx, cy, r, n=CIRCLE_SEGMENTS):
-    return [(cx + r * math.cos(2 * math.pi * i / n),
-             cy + r * math.sin(2 * math.pi * i / n)) for i in range(n)]
-
-
-def make_rectangle(x, y, w, h, angle=0.0) -> Polygon:
-    p = Polygon([(x, y), (x + w, y), (x + w, y + h), (x, y + h)])
-    return sh_rotate(p, angle, origin=(x + w / 2, y + h / 2))
-
-
-def make_l_shape(x, y, w, h, sw, sh_, angle=0.0) -> Polygon:
-    p = Polygon([(x, y), (x + w, y), (x + w, y + sh_),
-                 (x + sw, y + sh_), (x + sw, y + h), (x, y + h)])
-    return sh_rotate(p, angle, origin=(x + w / 2, y + h / 2))
-
-
-def make_t_shape(x, y, w, h, cap_h, angle=0.0) -> Polygon:
-    sw, sx = w / 3, x + w / 3
-    top  = Polygon([(x, y), (x + w, y), (x + w, y + cap_h), (x, y + cap_h)])
-    stem = Polygon([(sx, y + cap_h), (sx + sw, y + cap_h),
-                    (sx + sw, y + h), (sx, y + h)])
-    return sh_rotate(top.union(stem), angle, origin=(x + w / 2, y + h / 2))
-
-
-def make_hexagon(cx, cy, r, angle=0.0) -> Polygon:
-    pts = [(cx + r * math.cos(math.radians(60 * i)),
-            cy + r * math.sin(math.radians(60 * i))) for i in range(6)]
-    return sh_rotate(Polygon(pts), angle, origin=(cx, cy))
-
-
-def make_circle(cx, cy, r) -> Polygon:
-    return Polygon(_circle_pts(cx, cy, r))
-
-
-def make_semicircle(cx, cy, r, flat_angle=0.0, angle=0.0) -> Polygon:
-    n = CIRCLE_SEGMENTS // 2
-    pts = [(cx, cy)]
-    for i in range(n + 1):
-        a = math.radians(flat_angle) + math.pi * i / n
-        pts.append((cx + r * math.cos(a), cy + r * math.sin(a)))
-    return sh_rotate(Polygon(pts), angle, origin=(cx, cy))
-
-
-def make_road(waypoints, width) -> Polygon:
-    if len(waypoints) < 2:
-        return Polygon()
-    buf = LineString(waypoints).buffer(width / 2, cap_style=2, join_style=2)
-    return buf if buf.geom_type == "Polygon" else buf.convex_hull
-
-
-def building_polygon(b: dict) -> Polygon:
-    s = b["shape"]
-    x, y = float(b.get("x", 0)), float(b.get("y", 0))
-    angle = float(b.get("angle", 0))
-    try:
-        if s == "Rectangle":
-            return make_rectangle(x, y, b["width"], b["height"], angle)
-        if s == "L-Shape":
-            return make_l_shape(x, y, b["width"], b["height"],
-                                b.get("stem_w", b["width"] / 2),
-                                b.get("stem_h", b["height"] / 2), angle)
-        if s == "T-Shape":
-            return make_t_shape(x, y, b["width"], b["height"],
-                                b.get("cap_h", b["height"] / 3), angle)
-        if s == "Hexagon":
-            return make_hexagon(x, y, b["radius"], angle)
-        if s == "Circle":
-            return make_circle(x, y, b["radius"])
-        if s == "Semicircle":
-            return make_semicircle(x, y, b["radius"],
-                                   b.get("flat_angle", 0), angle)
-        if s == "Road":
-            wp = [tuple(p) for p in b.get("waypoints", [])]
-            return make_road(wp, b.get("road_width", 5.0))
-        if s == "Custom Polygon":
-            pts = b.get("custom_pts", [])
-            if len(pts) >= 3:
-                raw = Polygon(pts)
-                return sh_rotate(raw, angle, origin=raw.centroid)
-    except Exception:
-        pass
-    return Polygon()
-
-
-def site_polygon() -> Polygon:
-    v = st.session_state.site_vertices
-    return Polygon(v) if len(v) >= 3 else Polygon()
-
-
-def snap(val: float, grid: float) -> float:
-    return round(val / grid) * grid if grid > 0 else val
-
-
-# ─────────────────────────────────────────────────────────────
-# VALIDATION
-# ─────────────────────────────────────────────────────────────
-def check_collisions(target_id: str, poly: Polygon) -> list[str]:
-    m = st.session_state.safety_margin
-    return [
-        b["name"]
-        for bid, b in st.session_state.buildings.items()
-        if bid != target_id
-        and not building_polygon(b).is_empty
-        and poly.buffer(m / 2).intersects(building_polygon(b).buffer(m / 2))
-    ]
-
-
-def check_boundary(poly: Polygon) -> bool:
-    site = site_polygon()
-    if site.is_empty:
-        return True
-    inner = site.buffer(-st.session_state.boundary_threshold)
-    return (not inner.is_empty
-            and inner.geom_type in ("Polygon", "MultiPolygon")
-            and inner.contains(poly))
-
-
-# ─────────────────────────────────────────────────────────────
-# UTILISATION STATS
-# ─────────────────────────────────────────────────────────────
-def utilisation_stats() -> dict:
-    site = site_polygon()
-    site_area = site.area if not site.is_empty else 0.0
-    polys = [p for p in (building_polygon(b)
-                         for b in st.session_state.buildings.values())
-             if not p.is_empty]
-    union = unary_union(polys) if polys else Polygon()
-    inside = union.intersection(site).area if not site.is_empty else union.area
-    return {
-        "site_area":       site_area,
-        "inside_area":     inside,
-        "free_area":       max(0.0, site_area - inside),
-        "utilisation_pct": (inside / site_area * 100) if site_area > 0 else 0.0,
-        "n_buildings":     len(st.session_state.buildings),
-    }
-
-
-# ─────────────────────────────────────────────────────────────
-# IMPORT / EXPORT
-# ─────────────────────────────────────────────────────────────
-def export_state() -> str:
-    return json.dumps({
-        "site_vertices":      st.session_state.site_vertices,
-        "safety_margin":      st.session_state.safety_margin,
-        "boundary_threshold": st.session_state.boundary_threshold,
-        "buildings":          st.session_state.buildings,
-    }, indent=2)
-
-
-def import_state(raw: str) -> None:
-    data = json.loads(raw)
-    st.session_state.site_vertices      = [tuple(v) for v in data.get("site_vertices", DEFAULT_BOUNDARY)]
-    st.session_state.safety_margin      = data.get("safety_margin", 2.0)
-    st.session_state.boundary_threshold = data.get("boundary_threshold", 1.5)
-    st.session_state.buildings          = data.get("buildings", {})
-
-
-# ─────────────────────────────────────────────────────────────
-# BUILD CANVAS STATE PAYLOAD  (sent to JS)
-# ─────────────────────────────────────────────────────────────
-def _build_canvas_payload() -> str:
-    """Serialise everything the canvas needs to render."""
-    buildings_list = []
-    for bid, b in st.session_state.buildings.items():
-        poly = building_polygon(b)
-        pts: list[list[float]] = []
-        if not poly.is_empty:
-            xs, ys = poly.exterior.xy
-            pts = [[float(x), float(y)] for x, y in zip(xs, ys)]
-        buf_pts: list[list[float]] = []
-        if not poly.is_empty and st.session_state.show_safety_zones:
-            buf = poly.buffer(st.session_state.safety_margin)
-            if buf.geom_type == "Polygon":
-                bx, by = buf.exterior.xy
-                buf_pts = [[float(x), float(y)] for x, y in zip(bx, by)]
-        # bounding box for resize handles (axis-aligned, pre-rotation)
-        bb = poly.bounds if not poly.is_empty else (0, 0, 0, 0)
-        buildings_list.append({
-            "id":       bid,
-            "name":     b["name"],
-            "color":    b.get("color", "#4A90D9"),
-            "selected": bid == st.session_state.selected_id,
-            "pts":      pts,
-            "buf_pts":  buf_pts,
-            "x":        float(b.get("x", 0)),
-            "y":        float(b.get("y", 0)),
-            "width":    float(b.get("width", b.get("radius", 10) * 2)),
-            "height":   float(b.get("height", b.get("radius", 10) * 2)),
-            "radius":   float(b.get("radius", 0)),
-            "shape":    b["shape"],
-            "angle":    float(b.get("angle", 0)),
-            "bbox":     list(bb),
-            "bnd_ok":   check_boundary(poly),
-            "clr_ok":   not check_collisions(bid, poly),
-        })
-
-    site = site_polygon()
-    site_pts: list[list[float]] = []
-    setback_pts: list[list[float]] = []
-    if not site.is_empty:
-        sx, sy = site.exterior.xy
-        site_pts = [[float(x), float(y)] for x, y in zip(sx, sy)]
-        inner = site.buffer(-st.session_state.boundary_threshold)
-        if not inner.is_empty and inner.geom_type in ("Polygon", "MultiPolygon"):
-            g = inner if inner.geom_type == "Polygon" else list(inner.geoms)[0]
-            ix, iy = g.exterior.xy
-            setback_pts = [[float(x), float(y)] for x, y in zip(ix, iy)]
-
-    return json.dumps({
-        "buildings":      buildings_list,
-        "site_pts":       site_pts,
-        "setback_pts":    setback_pts,
-        "bnd_verts":      list(st.session_state.site_vertices),
-        "snap_grid":      st.session_state.snap_grid,
-        "show_safety":    st.session_state.show_safety_zones,
-        "edit_mode":      st.session_state.edit_mode,
-        "selected_id":    st.session_state.selected_id,
-    })
-
-
-# ─────────────────────────────────────────────────────────────
-# INTERACTIVE CANVAS  (one HTML component for everything)
-# ─────────────────────────────────────────────────────────────
-CANVAS_HTML = r"""
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: monospace; background: #F5F8FC; overflow: hidden; }
-#toolbar {
-  display: flex; gap: 6px; padding: 6px 8px; flex-wrap: wrap;
-  background: #EEF2F7; border-bottom: 1px solid #CDD9E8;
-  align-items: center;
-}
-button {
-  padding: 4px 10px; border: none; border-radius: 5px;
-  cursor: pointer; font-size: 11px; font-family: monospace; font-weight: 600;
-}
-.btn-blue   { background:#4A90D9; color:#fff; }
-.btn-red    { background:#E74C3C; color:#fff; }
-.btn-grey   { background:#95A5A6; color:#fff; }
-.btn-green  { background:#27AE60; color:#fff; }
-.btn-active { outline: 2px solid #fff; box-shadow: 0 0 0 3px #4A90D9; }
-#modeTag {
-  font-size:10px; padding:3px 8px; border-radius:10px;
-  background:#2C3E50; color:#fff; margin-left:4px;
-}
-#coords {
-  font-size:10px; color:#666; margin-left:auto;
-  background:#fff; padding:3px 8px; border-radius:4px;
-}
-label { font-size:11px; color:#444; display:flex; align-items:center; gap:4px; }
-input[type=range] { width:70px; }
-canvas {
-  display:block; cursor:crosshair;
-  background:#F5F8FC;
-}
-#hint {
-  position:absolute; bottom:6px; left:50%; transform:translateX(-50%);
-  font-size:10px; color:#888; pointer-events:none;
-  background:rgba(255,255,255,.8); padding:2px 10px; border-radius:8px;
-}
-</style>
-</head>
-<body>
-<div id="toolbar">
-  <!-- Structure-mode buttons -->
-  <span id="grp-struct">
-    <button class="btn-blue" id="btn-select"  onclick="setTool('select')">↖ Select</button>
-    <button class="btn-blue" id="btn-move"    onclick="setTool('move')">✋ Move</button>
-    <button class="btn-blue" id="btn-resize"  onclick="setTool('resize')">⤢ Resize</button>
-  </span>
-  <!-- Boundary-mode buttons (hidden in view mode) -->
-  <span id="grp-bnd" style="display:none">
-    <button class="btn-blue" id="btn-bmove"    onclick="setTool('bnd_move')">✋ Vertex</button>
-    <button class="btn-blue" id="btn-badd"     onclick="setTool('bnd_add')">➕ Add</button>
-    <button class="btn-red"  id="btn-bdel"     onclick="setTool('bnd_del')">🗑 Delete</button>
-    <button class="btn-green" id="btn-bfree"   onclick="setTool('bnd_free')">✏️ Freehand</button>
-    <button class="btn-grey"  onclick="smoothBnd()">〜 Smooth</button>
-    <button class="btn-grey"  onclick="resetBnd()">↩ Reset</button>
-  </span>
-  <!-- Always-visible -->
-  <button class="btn-grey" id="btn-pan" onclick="setTool('pan')">🖐 Pan</button>
-  <button class="btn-grey" onclick="resetView()">⊡ Fit</button>
-  <label>Grid:
-    <input type="range" id="gridSlider" min="0" max="20" step="1" value="1"
-           oninput="onGridChange(+this.value)">
-    <span id="gridVal">1</span>m
-  </label>
-  <span id="modeTag">SELECT</span>
-  <span id="coords">—</span>
-</div>
-<div style="position:relative">
-  <canvas id="c"></canvas>
-  <div id="hint"></div>
-</div>
-
-<script>
-// ═══════════════════════════════════════════════════════════
-// STATE
-// ═══════════════════════════════════════════════════════════
-let STATE = {};          // full payload from Python
-let tool  = 'select';
-let gridSize = 1;
-
-// pan/zoom
-let viewX = 0, viewY = 0, viewScale = 4; // world-units per pixel inverse → px per m
-let isPanning = false, panStart = {x:0,y:0}, panOrigin = {x:0,y:0};
-
-// drag state
-let dragging = null;  // {type, bid, startW, startC, origX, origY, origW, origH, origR, handle}
-let bndDrag  = -1;
-let freehand = false, fhPts = [];
-
-const canvas = document.getElementById('c');
-const ctx    = canvas.getContext('2d');
-
-// ═══════════════════════════════════════════════════════════
-// RESIZE CANVAS TO FILL PARENT
-// ═══════════════════════════════════════════════════════════
-function resizeCanvas() {
-  canvas.width  = window.innerWidth;
-  canvas.height = window.innerHeight - document.getElementById('toolbar').offsetHeight - 4;
-  draw();
-}
-window.addEventListener('resize', resizeCanvas);
-resizeCanvas();
-
-// ═══════════════════════════════════════════════════════════
-// COORDINATE TRANSFORMS
-// ═══════════════════════════════════════════════════════════
-// world → canvas pixel
-function w2c(wx, wy) {
-  return [viewX + wx * viewScale, canvas.height - viewY - wy * viewScale];
-}
-// canvas pixel → world
-function c2w(cx, cy) {
-  return [(cx - viewX) / viewScale, (canvas.height - viewY - cy) / viewScale];
-}
-function snapV(v) {
-  if (gridSize <= 0) return v;
-  return Math.round(v / gridSize) * gridSize;
-}
-
-// ═══════════════════════════════════════════════════════════
-// FIT VIEW TO SITE
-// ═══════════════════════════════════════════════════════════
-function resetView() {
-  if (!STATE.site_pts || STATE.site_pts.length < 2) {
-    viewX = 40; viewY = 40; viewScale = 5; draw(); return;
+  .shape-btn {
+    display: flex; align-items: center; gap: 5px;
+    border: 1px solid #C7D4E2; background: #fff; border-radius: 8px;
+    padding: 6px 10px; font-size: 12.5px; cursor: grab; user-select: none;
+    transition: box-shadow .15s, transform .15s;
   }
-  const xs = STATE.site_pts.map(p=>p[0]);
-  const ys = STATE.site_pts.map(p=>p[1]);
-  const minX=Math.min(...xs), maxX=Math.max(...xs);
-  const minY=Math.min(...ys), maxY=Math.max(...ys);
-  const pad = 40;
-  const scaleX = (canvas.width  - pad*2) / (maxX - minX || 1);
-  const scaleY = (canvas.height - pad*2) / (maxY - minY || 1);
-  viewScale = Math.min(scaleX, scaleY);
-  viewX = pad - minX * viewScale;
-  viewY = pad - minY * viewScale;
-  draw();
+  .shape-btn:hover { box-shadow: 0 2px 6px rgba(0,0,0,.12); transform: translateY(-1px); }
+  .shape-btn:active { cursor: grabbing; }
+  .shape-icon { font-size: 14px; }
+
+  select, input[type="text"], input[type="number"] {
+    border: 1px solid #C7D4E2; border-radius: 6px; padding: 4px 7px; font-size: 12.5px;
+  }
+
+  .hint { font-size: 11.5px; color: #8094A8; margin-bottom: 8px; }
+
+  #main { display: flex; gap: 12px; align-items: flex-start; }
+
+  #canvasWrap {
+    flex: 1 1 auto; border: 1px solid #D4DFEA; border-radius: 10px; background: #fff;
+    min-width: 0; position: relative;
+  }
+  svg#canvas { width: 100%; height: auto; display: block; border-radius: 10px; touch-action: none; }
+
+  #side {
+    flex: 0 0 240px; max-width: 240px;
+    border: 1px solid #D4DFEA; border-radius: 10px; background: #fff; padding: 10px;
+    max-height: 480px; overflow-y: auto;
+  }
+  #side h4 { margin: 0 0 8px; font-size: 12.5px; color: #4A5A6A; }
+
+  .stats-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .stat {
+    background: #F0F4FA; border-left: 3px solid #4A90D9; border-radius: 6px;
+    padding: 5px 8px; font-size: 11px; flex: 1 1 70px;
+  }
+  .stat b { display: block; font-size: 13.5px; }
+
+  .bld-row {
+    border: 1px solid #E3EAF2; border-radius: 8px; padding: 7px 8px; margin-bottom: 7px;
+  }
+  .bld-row.selected { border-color: #4A90D9; background: #F3F8FE; }
+  .bld-row .top { display: flex; align-items: center; gap: 6px; margin-bottom: 5px; }
+  .swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+  .bld-row input[type="text"] { flex: 1 1 auto; min-width: 0; font-size: 12px; }
+  .bld-row .meta { font-size: 10.5px; color: #8094A8; margin-bottom: 5px; }
+  .bld-row .thresh-row { display: flex; align-items: center; gap: 5px; }
+  .bld-row .thresh-row label { font-size: 11px; color: #4A5A6A; }
+  .bld-row .thresh-row input { width: 70px; }
+  .del-btn {
+    border: none; background: #FCEAEA; color: #C0392B; border-radius: 6px;
+    width: 20px; height: 20px; cursor: pointer; font-size: 12px; flex: none; line-height: 1;
+  }
+  .empty-list { font-size: 12px; color: #95A5B5; text-align: center; padding: 14px 4px; }
+
+  .warn-badge { color: #E74C3C; font-size: 10.5px; font-weight: 600; }
+"""
+
+_CANVAS_JS = """
+export default function(component) {
+const { data, parentElement, setStateValue } = component;
+
+// ─────────────────────────────────────────────────────────────
+// CONSTANTS / GEOMETRY DEFINITIONS
+// ─────────────────────────────────────────────────────────────
+const WORLD_W = 200, WORLD_H = 130;
+const MIN_SIZE = 3;
+const SNAP = 0.5;
+
+function snap(v) { return Math.round(v / SNAP) * SNAP; }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+
+// Boundary presets are ABSOLUTE world-coordinate point lists (not
+// normalized 0-1 + a box) since vertices are dragged independently and
+// there's no longer a single box that the whole shape scales against.
+// These are just *starting points* for the dropdown / sides-input reset —
+// every point is freely draggable afterward.
+const BOUNDARY_DEFAULT_CX = 90, BOUNDARY_DEFAULT_CY = 65;   // roughly centered in WORLD_W x WORLD_H
+const BOUNDARY_DEFAULT_R = 55;
+
+function genNGon(n, cx, cy, r) {
+  // Evenly spaced N-sided polygon, point 0 at the top, going clockwise —
+  // used both for named presets that happen to be regular polygons and
+  // for the freeform "sides: N" regenerate.
+  const pts = [];
+  for (let i = 0; i < n; i++) {
+    const a = -Math.PI / 2 + (2 * Math.PI * i) / n;
+    pts.push([snap(cx + r * Math.cos(a)), snap(cy + r * Math.sin(a))]);
+  }
+  return pts;
 }
 
-// ═══════════════════════════════════════════════════════════
-// GRID
-// ═══════════════════════════════════════════════════════════
-function onGridChange(v) {
-  gridSize = v;
-  document.getElementById('gridVal').textContent = v || 'off';
-  // sync back to python
-  sendEvent({type:'grid', value: v});
-  draw();
-}
-
-// ═══════════════════════════════════════════════════════════
-// TOOL MANAGEMENT
-// ═══════════════════════════════════════════════════════════
-const TOOL_HINTS = {
-  select:   'Click a structure to select it',
-  move:     'Drag a structure to reposition it',
-  resize:   'Drag the corner handles to resize',
-  pan:      'Drag the canvas to pan · Scroll to zoom',
-  bnd_move: 'Drag a boundary vertex',
-  bnd_add:  'Click to add a vertex on the nearest edge',
-  bnd_del:  'Click a vertex to delete it',
-  bnd_free: 'Click-drag to draw a freehand outline',
+const BOUNDARY_PRESETS = {
+  rectangle: [[15,15],[165,15],[165,110],[15,110]],
+  l_shape:   [[15,15],[165,15],[165,62],[90,62],[90,110],[15,110]],
+  pentagon:  genNGon(5, BOUNDARY_DEFAULT_CX, BOUNDARY_DEFAULT_CY, BOUNDARY_DEFAULT_R),
+  hexagon:   genNGon(6, BOUNDARY_DEFAULT_CX, BOUNDARY_DEFAULT_CY, BOUNDARY_DEFAULT_R),
+  trapezoid: [[51,15],[149,15],[165,110],[35,110]],
 };
-function setTool(t) {
-  tool = t;
-  freehand = false; fhPts = [];
-  dragging = null; bndDrag = -1;
-  document.getElementById('modeTag').textContent = t.toUpperCase().replace('_',' ');
-  document.getElementById('hint').textContent = TOOL_HINTS[t] || '';
-  // highlight active button
-  document.querySelectorAll('button').forEach(b=>b.classList.remove('btn-active'));
-  const map = {select:'btn-select', move:'btn-move', resize:'btn-resize',
-               pan:'btn-pan', bnd_move:'btn-bmove', bnd_add:'btn-badd',
-               bnd_del:'btn-bdel', bnd_free:'btn-bfree'};
-  const el = document.getElementById(map[t]);
-  if (el) el.classList.add('btn-active');
-  draw();
+
+const BUILDING_SHAPES = {
+  rectangle: { norm: [[0,0],[1,0],[1,1],[0,1]],            defW: 22, defH: 14, label: "Rectangle" },
+  triangle:  { norm: [[0.5,0],[1,1],[0,1]],                 defW: 18, defH: 14, label: "Triangle"  },
+  l_shape:   { norm: [[0,0],[1,0],[1,0.5],[0.5,0.5],[0.5,1],[0,1]], defW: 20, defH: 16, label: "L-Shape" },
+  circle:    { norm: null,                                  defW: 14, defH: 14, label: "Circle"    },
+};
+
+const COLORS = ["#4A90D9", "#E07B39", "#6BBF59", "#9B59B6", "#16A085", "#D4AC0D", "#C0392B", "#7F8C8D"];
+
+// ─────────────────────────────────────────────────────────────
+// STATE  (seeded once from `data`, the Python-side layout passed in
+// at mount time — see loadState() below, which also migrates any
+// old-format save file the user might load)
+// ─────────────────────────────────────────────────────────────
+let STATE = { boundary: { preset: "rectangle", sides: 4, points: BOUNDARY_PRESETS.rectangle.map(p => [...p]) }, buildings: [] };
+let nextId = 1;
+let selected = null;        // { type: 'building', id } | { type: 'boundary' } | null
+let drag = null;            // active pointer drag info
+
+const svg = parentElement.querySelector("#canvas");
+const bldListEl = parentElement.querySelector("#bldList");
+const statsRowEl = parentElement.querySelector("#statsRow");
+const boundarySelect = parentElement.querySelector("#boundarySelect");
+const boundarySidesInput = parentElement.querySelector("#boundarySides");
+
+// ─────────────────────────────────────────────────────────────
+// GEOMETRY HELPERS
+// ─────────────────────────────────────────────────────────────
+function scalePoints(norm, x, y, w, h) {
+  return norm.map(([nx, ny]) => [x + nx * w, y + ny * h]);
 }
-
-// ═══════════════════════════════════════════════════════════
-// DRAW
-// ═══════════════════════════════════════════════════════════
-function drawPolygon(pts) {
-  if (!pts || pts.length < 2) return;
-  ctx.beginPath();
-  pts.forEach(([wx,wy], i) => {
-    const [px,py] = w2c(wx,wy);
-    i===0 ? ctx.moveTo(px,py) : ctx.lineTo(px,py);
-  });
-  ctx.closePath();
+function shapePoints(b) {
+  if (b.shape === "circle") {
+    const cx = b.x + b.w / 2, cy = b.y + b.h / 2, r = b.w / 2;
+    const n = 28, pts = [];
+    for (let i = 0; i < n; i++) {
+      const a = (2 * Math.PI * i) / n;
+      pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
+    }
+    return pts;
+  }
+  return scalePoints(BUILDING_SHAPES[b.shape].norm, b.x, b.y, b.w, b.h);
 }
-
-function draw() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  // ── grid ──────────────────────────────────────────────
-  if (gridSize > 0 && viewScale > 2) {
-    const [wx0] = c2w(0, 0);
-    const [wx1] = c2w(canvas.width, 0);
-    const [,wy0] = c2w(0, canvas.height);
-    const [,wy1] = c2w(0, 0);
-    const startX = Math.floor(wx0/gridSize)*gridSize;
-    const startY = Math.floor(wy0/gridSize)*gridSize;
-    ctx.strokeStyle = 'rgba(180,200,220,0.5)';
-    ctx.lineWidth = 0.5;
-    for (let gx=startX; gx<=wx1+gridSize; gx+=gridSize) {
-      const [px] = w2c(gx,0);
-      ctx.beginPath(); ctx.moveTo(px,0); ctx.lineTo(px,canvas.height); ctx.stroke();
-    }
-    for (let gy=startY; gy<=wy1+gridSize; gy+=gridSize) {
-      const [,py] = w2c(0,gy);
-      ctx.beginPath(); ctx.moveTo(0,py); ctx.lineTo(canvas.width,py); ctx.stroke();
-    }
-    // axis labels
-    ctx.fillStyle='#aab'; ctx.font='9px monospace';
-    for (let gx=startX; gx<=wx1+gridSize; gx+=gridSize*2) {
-      const [px,py] = w2c(gx,0);
-      ctx.fillText(Math.round(gx), px+2, py-3);
-    }
-    for (let gy=startY; gy<=wy1+gridSize; gy+=gridSize*2) {
-      const [px,py] = w2c(0,gy);
-      ctx.fillText(Math.round(gy), px+3, py);
-    }
-  }
-
-  if (!STATE.site_pts) return;
-
-  // ── site boundary fill ────────────────────────────────
-  if (STATE.site_pts.length >= 3) {
-    drawPolygon(STATE.site_pts);
-    ctx.fillStyle = 'rgba(215,228,245,0.25)';
-    ctx.fill();
-    ctx.strokeStyle = '#2C3E50';
-    ctx.lineWidth = 2;
-    ctx.setLineDash([8,4]);
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
-
-  // ── setback line ─────────────────────────────────────
-  if (STATE.setback_pts.length >= 3) {
-    drawPolygon(STATE.setback_pts);
-    ctx.strokeStyle = '#E74C3C';
-    ctx.lineWidth = 1;
-    ctx.setLineDash([4,3]);
-    ctx.stroke();
-    ctx.setLineDash([]);
-  }
-
-  // ── buildings ─────────────────────────────────────────
-  for (const b of STATE.buildings) {
-    if (!b.pts.length) continue;
-
-    // safety buffer
-    if (STATE.show_safety && b.buf_pts.length) {
-      drawPolygon(b.buf_pts);
-      ctx.fillStyle = hexA(b.color, 0.08);
-      ctx.fill();
-      ctx.strokeStyle = hexA(b.color, 0.25);
-      ctx.lineWidth = 1;
-      ctx.setLineDash([3,3]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-
-    // building fill
-    drawPolygon(b.pts);
-    ctx.fillStyle = hexA(b.color, b.selected ? 0.82 : 0.58);
-    ctx.fill();
-    ctx.strokeStyle = b.selected ? b.color : hexA(b.color, 0.9);
-    ctx.lineWidth = b.selected ? 3 : 1.5;
-    if (!b.bnd_ok || !b.clr_ok) {
-      ctx.strokeStyle = '#E74C3C';
-      ctx.setLineDash([5,3]);
-    }
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // label
-    if (b.pts.length > 0) {
-      const cx = b.pts.reduce((s,p)=>s+p[0],0)/b.pts.length;
-      const cy = b.pts.reduce((s,p)=>s+p[1],0)/b.pts.length;
-      const [px,py] = w2c(cx,cy);
-      ctx.fillStyle='#1a1a1a';
-      ctx.font = `${Math.max(9, Math.min(13, viewScale*2))}px monospace`;
-      ctx.textAlign='center'; ctx.textBaseline='middle';
-      ctx.fillText(b.name, px, py);
-      ctx.textAlign='left'; ctx.textBaseline='alphabetic';
-    }
-
-    // resize handles (only for selected in resize mode)
-    if (b.selected && tool === 'resize' && b.bbox.length===4) {
-      const handles = getResizeHandles(b);
-      for (const h of handles) {
-        const [hx,hy] = w2c(h.wx, h.wy);
-        ctx.fillStyle='#fff';
-        ctx.strokeStyle='#4A90D9';
-        ctx.lineWidth=1.5;
-        ctx.beginPath();
-        ctx.rect(hx-5, hy-5, 10, 10);
-        ctx.fill(); ctx.stroke();
-      }
-    }
-
-    // status badges
-    if (!b.bnd_ok || !b.clr_ok) {
-      if (b.pts.length>0) {
-        const [px,py] = w2c(b.pts[0][0], b.pts[0][1]);
-        ctx.font='11px monospace';
-        ctx.fillText(b.bnd_ok ? '' : '⚠', px, py-4);
-      }
-    }
-  }
-
-  // ── boundary edit handles ─────────────────────────────
-  const inBnd = STATE.edit_mode === 'edit_boundary';
-  if (inBnd && STATE.bnd_verts) {
-    STATE.bnd_verts.forEach(([wx,wy], i) => {
-      const [px,py] = w2c(wx,wy);
-      ctx.beginPath();
-      ctx.arc(px,py, i===bndDrag ? 9 : 6, 0, 2*Math.PI);
-      ctx.fillStyle   = i===bndDrag ? '#E74C3C' : '#4A90D9';
-      ctx.strokeStyle = '#fff';
-      ctx.lineWidth   = 2;
-      ctx.fill(); ctx.stroke();
-      ctx.fillStyle='#2C3E50'; ctx.font='9px monospace';
-      ctx.fillText(i, px+7, py-5);
-    });
-  }
-
-  // ── freehand preview ─────────────────────────────────
-  if (fhPts.length > 1) {
-    ctx.beginPath();
-    fhPts.forEach(([wx,wy],i)=>{
-      const [px,py]=w2c(wx,wy);
-      i===0?ctx.moveTo(px,py):ctx.lineTo(px,py);
-    });
-    ctx.strokeStyle='#E74C3C'; ctx.lineWidth=2;
-    ctx.setLineDash([4,3]); ctx.stroke(); ctx.setLineDash([]);
-  }
+function boundaryPoints(bnd) {
+  return bnd.points;
 }
-
-// ═══════════════════════════════════════════════════════════
-// RESIZE HANDLES  (4 corner handles in world coords)
-// ═══════════════════════════════════════════════════════════
-function getResizeHandles(b) {
-  const [x0,y0,x1,y1] = b.bbox;
-  return [
-    {id:'tl', wx:x0, wy:y1},
-    {id:'tr', wx:x1, wy:y1},
-    {id:'bl', wx:x0, wy:y0},
-    {id:'br', wx:x1, wy:y0},
-  ];
+function polygonCentroid(pts) {
+  // Simple averaged centroid (not the area-weighted centroid) — good enough
+  // for "keep the shape roughly where it was" when regenerating vertex count.
+  let sx = 0, sy = 0;
+  for (const [x, y] of pts) { sx += x; sy += y; }
+  return [sx / pts.length, sy / pts.length];
 }
-
-function hitHandle(b, cx, cy, thresh=10) {
-  for (const h of getResizeHandles(b)) {
-    const [hx,hy] = w2c(h.wx, h.wy);
-    if (Math.hypot(cx-hx, cy-hy) < thresh) return h;
+function shoelaceArea(pts) {
+  let s = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [x1, y1] = pts[i], [x2, y2] = pts[(i + 1) % pts.length];
+    s += x1 * y2 - x2 * y1;
   }
-  return null;
+  return Math.abs(s) / 2;
 }
-
-// ═══════════════════════════════════════════════════════════
-// HIT TESTING  (point-in-polygon for buildings)
-// ═══════════════════════════════════════════════════════════
-function pointInPoly(px, py, pts) {
+function pointInPolygon(px, py, pts) {
   let inside = false;
-  for (let i=0, j=pts.length-1; i<pts.length; j=i++) {
-    const [xi,yi]=pts[i], [xj,yj]=pts[j];
-    if (((yi>py)!==(yj>py)) && (px < (xj-xi)*(py-yi)/(yj-yi)+xi))
-      inside = !inside;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, yi] = pts[i], [xj, yj] = pts[j];
+    if ((yi > py) !== (yj > py) && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) inside = !inside;
   }
   return inside;
 }
-
-function hitBuilding(cx, cy) {
-  const [wx,wy] = c2w(cx,cy);
-  // iterate in reverse so top-most drawn is selected first
-  for (let i=STATE.buildings.length-1; i>=0; i--) {
-    const b = STATE.buildings[i];
-    if (pointInPoly(wx, wy, b.pts)) return b;
-  }
-  return null;
+function rectsOverlap(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 }
 
-// ═══════════════════════════════════════════════════════════
-// BOUNDARY HELPERS
-// ═══════════════════════════════════════════════════════════
-function closestBndVertex(cx, cy, thresh=14) {
-  let best=-1, bd=Infinity;
-  (STATE.bnd_verts||[]).forEach(([wx,wy],i)=>{
-    const [px,py]=w2c(wx,wy);
-    const d=Math.hypot(cx-px,cy-py);
-    if(d<bd&&d<thresh){bd=d;best=i;}
+function screenToWorld(clientX, clientY) {
+  const pt = svg.createSVGPoint();
+  pt.x = clientX; pt.y = clientY;
+  const ctm = svg.getScreenCTM().inverse();
+  const p = pt.matrixTransform(ctm);
+  return [p.x, p.y];
+}
+
+function buildingInsideBoundary(b) {
+  const bp = boundaryPoints(STATE.boundary);
+  const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+  return pointInPolygon(cx, cy, bp);
+}
+
+function buildingArea(b) {
+  if (b.shape === "circle") return Math.PI * (b.w / 2) * (b.w / 2);
+  return shoelaceArea(shapePoints(b));
+}
+
+// ─────────────────────────────────────────────────────────────
+// SVG ELEMENT HELPERS
+// ─────────────────────────────────────────────────────────────
+const NS = "http://www.w3.org/2000/svg";
+function el(tag, attrs) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+function pointsToAttr(pts) { return pts.map(p => p.join(",")).join(" "); }
+
+function makeHandles(bbox, role, id) {
+  const [x0, y0, x1, y1] = bbox;
+  const corners = [["nw", x0, y0], ["ne", x1, y0], ["sw", x0, y1], ["se", x1, y1]];
+  const group = el("g", {});
+  for (const [corner, cx, cy] of corners) {
+    const h = el("rect", {
+      x: cx - 2.6, y: cy - 2.6, width: 5.2, height: 5.2,
+      fill: "#fff", stroke: "#4A90D9", "stroke-width": 1,
+      "data-role": "handle", "data-target": role, "data-id": id || "", "data-corner": corner,
+      style: `cursor:${corner}-resize`,
+    });
+    group.appendChild(h);
+  }
+  return group;
+}
+
+function makeVertexHandles(pts) {
+  // One draggable circular handle per boundary vertex — round, rather than
+  // the square corner-resize handles, so the two interaction styles read
+  // as visually distinct at a glance.
+  const group = el("g", {});
+  pts.forEach(([x, y], i) => {
+    const h = el("circle", {
+      cx: x, cy: y, r: 3,
+      fill: "#fff", stroke: "#4A90D9", "stroke-width": 1.4,
+      "data-role": "handle", "data-target": "boundary-vertex", "data-index": i,
+      style: "cursor:move",
+    });
+    group.appendChild(h);
   });
-  return best;
+  return group;
 }
 
-function smoothBnd() {
-  const v = STATE.bnd_verts;
-  if (!v || v.length < 4) return;
-  const out=[], n=v.length;
-  for(let i=0;i<n;i++){
-    const [x0,y0]=v[i],[x1,y1]=v[(i+1)%n];
-    out.push([0.75*x0+0.25*x1, 0.75*y0+0.25*y1]);
-    out.push([0.25*x0+0.75*x1, 0.25*y0+0.75*y1]);
+// ─────────────────────────────────────────────────────────────
+// RENDER
+// ─────────────────────────────────────────────────────────────
+function render() {
+  svg.innerHTML = "";
+
+  // grid background
+  const defs = el("defs", {});
+  const pattern = el("pattern", { id: "grid", width: 10, height: 10, patternUnits: "userSpaceOnUse" });
+  pattern.appendChild(el("path", { d: "M 10 0 L 0 0 0 10", fill: "none", stroke: "#EEF2F7", "stroke-width": 0.4 }));
+  defs.appendChild(pattern);
+  svg.appendChild(defs);
+  svg.appendChild(el("rect", { x: 0, y: 0, width: WORLD_W, height: WORLD_H, fill: "url(#grid)" }));
+
+  // boundary — selecting it shows one draggable handle per vertex; there's
+  // no separate "move the whole shape" mode, only per-vertex editing.
+  const bPts = boundaryPoints(STATE.boundary);
+  const isBndSel = selected && selected.type === "boundary";
+  svg.appendChild(el("polygon", {
+    points: pointsToAttr(bPts), fill: "rgba(74,144,217,0.07)",
+    stroke: isBndSel ? "#4A90D9" : "#9FB4CC", "stroke-width": isBndSel ? 2 : 1.3,
+    "stroke-dasharray": "6,3", "data-role": "boundary",
+  }));
+  if (isBndSel) {
+    svg.appendChild(makeVertexHandles(bPts));
   }
-  STATE.bnd_verts = out;
-  sendEvent({type:'bnd_update', verts: STATE.bnd_verts});
-  draw();
-}
-function resetBnd() {
-  sendEvent({type:'bnd_reset'});
-}
 
-// ═══════════════════════════════════════════════════════════
-// MOUSE EVENTS
-// ═══════════════════════════════════════════════════════════
-function getPos(e) {
-  const r = canvas.getBoundingClientRect();
-  return [e.clientX-r.left, e.clientY-r.top];
-}
+  // buildings
+  STATE.buildings.forEach((b, idx) => {
+    const pts = shapePoints(b);
+    const inside = buildingInsideBoundary(b);
+    const overlapping = STATE.buildings.some((o, j) => j !== idx && rectsOverlap(b, o));
+    const isSel = selected && selected.type === "building" && selected.id === b.id;
 
-function hexA(hex, a) {
-  const h=hex.replace('#','');
-  const r=parseInt(h.slice(0,2),16), g=parseInt(h.slice(2,4),16), b=parseInt(h.slice(4,6),16);
-  return `rgba(${r},${g},${b},${a})`;
-}
+    const g = el("g", { "data-role": "building", "data-id": b.id, style: "cursor:move" });
+    const poly = el("polygon", {
+      points: pointsToAttr(pts),
+      fill: b.color, "fill-opacity": isSel ? 0.85 : 0.6,
+      stroke: (!inside || overlapping) ? "#E74C3C" : b.color,
+      "stroke-width": isSel ? 2.4 : 1.4,
+      "stroke-dasharray": (!inside || overlapping) ? "4,2" : "none",
+    });
+    g.appendChild(poly);
 
-canvas.addEventListener('mousedown', e => {
-  const [cx,cy] = getPos(e);
-  const [wx,wy] = c2w(cx,cy);
+    const cx = b.x + b.w / 2, cy = b.y + b.h / 2;
+    const label = el("text", {
+      x: cx, y: cy, "text-anchor": "middle", "dominant-baseline": "middle",
+      "font-size": 5.4, fill: "#1F2D3D", "pointer-events": "none",
+    });
+    label.textContent = b.name;
+    g.appendChild(label);
 
-  // Middle-mouse always pans
-  if (e.button===1 || (e.button===0 && tool==='pan')) {
-    isPanning=true; panStart={x:cx,y:cy}; panOrigin={x:viewX,y:viewY};
-    canvas.style.cursor='grabbing'; e.preventDefault(); return;
-  }
-  if (e.button!==0) return;
-
-  const inBnd = STATE.edit_mode==='edit_boundary';
-
-  if (inBnd) {
-    if (tool==='bnd_move') {
-      bndDrag = closestBndVertex(cx,cy);
-    } else if (tool==='bnd_add') {
-      const sx=snapV(wx), sy=snapV(wy);
-      const v=STATE.bnd_verts;
-      if (v.length<2){v.push([sx,sy]); sendEvent({type:'bnd_update',verts:v}); draw(); return;}
-      let best=0,bd=Infinity;
-      for(let i=0;i<v.length;i++){
-        const [ax,ay]=v[i],[bx,by]=v[(i+1)%v.length];
-        const mx=(ax+bx)/2,my=(ay+by)/2;
-        const d=Math.hypot(sx-mx,sy-my);
-        if(d<bd){bd=d;best=i;}
-      }
-      v.splice(best+1,0,[sx,sy]);
-      sendEvent({type:'bnd_update',verts:v}); draw();
-    } else if (tool==='bnd_del') {
-      const idx=closestBndVertex(cx,cy);
-      const v=STATE.bnd_verts;
-      if(idx>=0&&v.length>3){v.splice(idx,1); sendEvent({type:'bnd_update',verts:v}); draw();}
-    } else if (tool==='bnd_free') {
-      freehand=true; fhPts=[[wx,wy]];
+    if (!inside || overlapping) {
+      const warn = el("text", { x: b.x, y: b.y - 1.5, "font-size": 6, "pointer-events": "none" });
+      warn.textContent = "\u26A0";
+      g.appendChild(warn);
     }
+
+    svg.appendChild(g);
+    if (isSel) {
+      const bb = [b.x, b.y, b.x + b.w, b.y + b.h];
+      const handleGroup = makeHandles(bb, "building", b.id);
+      if (b.shape === "circle") {
+        // only the se handle is meaningful for circles (uniform radius)
+        [...handleGroup.children].forEach(h => {
+          if (h.getAttribute("data-corner") !== "se") h.style.display = "none";
+        });
+      }
+      svg.appendChild(handleGroup);
+    }
+  });
+
+  renderSidePanel();
+}
+
+function renderSidePanel() {
+  // stats
+  const siteArea = shoelaceArea(boundaryPoints(STATE.boundary));
+  const builtArea = STATE.buildings.reduce((s, b) => s + buildingArea(b), 0);
+  const pct = siteArea > 0 ? (builtArea / siteArea) * 100 : 0;
+  statsRowEl.innerHTML = `
+    <div class="stat">Site area<b>${siteArea.toFixed(0)} m&sup2;</b></div>
+    <div class="stat">Built area<b>${builtArea.toFixed(0)} m&sup2;</b></div>
+    <div class="stat">Utilisation<b>${pct.toFixed(1)}%</b></div>
+  `;
+
+  // building list
+  bldListEl.innerHTML = "";
+  if (STATE.buildings.length === 0) {
+    bldListEl.innerHTML = '<div class="empty-list">No buildings yet —<br/>drag a shape onto the site.</div>';
+    return;
+  }
+  STATE.buildings.forEach(b => {
+    const inside = buildingInsideBoundary(b);
+    const row = document.createElement("div");
+    row.className = "bld-row" + (selected && selected.type === "building" && selected.id === b.id ? " selected" : "");
+    row.addEventListener("pointerdown", () => { selected = { type: "building", id: b.id }; render(); });
+
+    const top = document.createElement("div");
+    top.className = "top";
+    const sw = document.createElement("div");
+    sw.className = "swatch"; sw.style.background = b.color;
+    const nameInput = document.createElement("input");
+    nameInput.type = "text"; nameInput.value = b.name;
+    nameInput.addEventListener("input", e => { b.name = e.target.value; });
+    nameInput.addEventListener("change", () => { render(); syncToPython(); });
+    const delBtn = document.createElement("button");
+    delBtn.className = "del-btn"; delBtn.textContent = "\u2715";
+    delBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      STATE.buildings = STATE.buildings.filter(x => x.id !== b.id);
+      if (selected && selected.type === "building" && selected.id === b.id) selected = null;
+      render(); syncToPython();
+    });
+    top.appendChild(sw); top.appendChild(nameInput); top.appendChild(delBtn);
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.innerHTML = `${BUILDING_SHAPES[b.shape].label} &middot; ${buildingArea(b).toFixed(1)} m&sup2;` +
+      (inside ? "" : ' &middot; <span class="warn-badge">outside boundary</span>');
+
+    const threshRow = document.createElement("div");
+    threshRow.className = "thresh-row";
+    const tLabel = document.createElement("label");
+    tLabel.textContent = "Threshold:";
+    const tInput = document.createElement("input");
+    tInput.type = "number"; tInput.step = "any"; tInput.value = b.threshold;
+    tInput.addEventListener("input", e => { b.threshold = e.target.value; });
+    tInput.addEventListener("change", () => { syncToPython(); });
+    threshRow.appendChild(tLabel); threshRow.appendChild(tInput);
+
+    row.appendChild(top); row.appendChild(meta); row.appendChild(threshRow);
+    bldListEl.appendChild(row);
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// SYNC TO PYTHON  (only on discrete events — never mid-drag)
+// ─────────────────────────────────────────────────────────────
+function syncToPython() {
+  const siteArea = shoelaceArea(boundaryPoints(STATE.boundary));
+  const builtArea = STATE.buildings.reduce((s, b) => s + buildingArea(b), 0);
+  setStateValue("layout", {
+    boundary: STATE.boundary,
+    buildings: STATE.buildings,
+    site_area: siteArea,
+    built_area: builtArea,
+    utilization_pct: siteArea > 0 ? (builtArea / siteArea) * 100 : 0,
+  });
+}
+
+// ─────────────────────────────────────────────────────────────
+// ADD BUILDING
+// ─────────────────────────────────────────────────────────────
+function addBuilding(shape, worldX, worldY) {
+  const def = BUILDING_SHAPES[shape];
+  const w = def.defW, h = def.defH;
+  const x = worldX !== undefined ? snap(worldX - w / 2) : snap(20 + (STATE.buildings.length % 5) * 4);
+  const y = worldY !== undefined ? snap(worldY - h / 2) : snap(20 + (STATE.buildings.length % 5) * 4);
+  const b = {
+    id: nextId++,
+    shape, x: clamp(x, 0, WORLD_W - w), y: clamp(y, 0, WORLD_H - h), w, h,
+    name: `${def.label} ${STATE.buildings.length + 1}`,
+    threshold: 0,
+    color: COLORS[STATE.buildings.length % COLORS.length],
+  };
+  STATE.buildings.push(b);
+  selected = { type: "building", id: b.id };
+  render();
+  syncToPython();
+}
+
+// palette: click-to-add
+parentElement.querySelectorAll(".shape-btn").forEach(btn => {
+  btn.addEventListener("click", () => addBuilding(btn.dataset.shape));
+  btn.addEventListener("dragstart", e => {
+    e.dataTransfer.setData("text/plain", btn.dataset.shape);
+    e.dataTransfer.effectAllowed = "copy";
+  });
+});
+svg.addEventListener("dragover", e => { e.preventDefault(); });
+svg.addEventListener("drop", e => {
+  e.preventDefault();
+  const shape = e.dataTransfer.getData("text/plain");
+  if (!BUILDING_SHAPES[shape]) return;
+  const [wx, wy] = screenToWorld(e.clientX, e.clientY);
+  addBuilding(shape, wx, wy);
+});
+
+// boundary preset selector
+boundarySelect.addEventListener("change", () => {
+  const preset = boundarySelect.value;
+  const shape = BOUNDARY_PRESETS[preset];
+  STATE.boundary = { preset, sides: shape.length, points: shape.map(p => [...p]) };
+  boundarySidesInput.value = shape.length;
+  render();
+  syncToPython();
+});
+
+boundarySidesInput.addEventListener("change", () => {
+  let n = Math.round(Number(boundarySidesInput.value));
+  if (!Number.isFinite(n)) n = STATE.boundary.points.length;
+  n = clamp(n, 3, 20);
+  boundarySidesInput.value = n;
+
+  // Regenerate around the boundary's current centroid (and a radius derived
+  // from its current extent) so changing the side count doesn't relocate or
+  // wildly resize a shape the user already dragged into place.
+  const [cx, cy] = polygonCentroid(STATE.boundary.points);
+  const xs = STATE.boundary.points.map(p => p[0]), ys = STATE.boundary.points.map(p => p[1]);
+  const r = Math.max(10, (Math.max(...xs) - Math.min(...xs) + Math.max(...ys) - Math.min(...ys)) / 4);
+
+  STATE.boundary = { preset: "custom", sides: n, points: genNGon(n, cx, cy, r) };
+  render();
+  syncToPython();
+});
+
+// ─────────────────────────────────────────────────────────────
+// POINTER INTERACTION (move + resize), via native hit-testing
+// ─────────────────────────────────────────────────────────────
+svg.addEventListener("pointerdown", e => {
+  const target = e.target.closest("[data-role]");
+  const [wx, wy] = screenToWorld(e.clientX, e.clientY);
+
+  if (!target) { selected = null; render(); return; }
+  const role = target.getAttribute("data-role");
+
+  if (role === "handle") {
+    const targetType = target.getAttribute("data-target");
+
+    if (targetType === "boundary-vertex") {
+      const index = Number(target.getAttribute("data-index"));
+      selected = { type: "boundary" };
+      drag = { mode: "vertex", index };
+      svg.setPointerCapture(e.pointerId);
+      return;
+    }
+
+    const corner = target.getAttribute("data-corner");
+    const id = target.getAttribute("data-id");
+    const obj = STATE.buildings.find(b => String(b.id) === id);
+    if (!obj) return;
+    drag = { mode: "resize", obj, corner, isCircle: obj.shape === "circle" };
+    svg.setPointerCapture(e.pointerId);
     return;
   }
 
-  // ── Structure tools ──────────────────────────────────
-  if (tool==='select'||tool==='move'||tool==='resize') {
-    // check resize handles first
-    if (tool==='resize') {
-      const sel = STATE.buildings.find(b=>b.selected);
-      if (sel) {
-        const h = hitHandle(sel, cx, cy);
-        if (h) {
-          dragging={type:'resize', bid:sel.id, handle:h.id,
-                    startW:[wx,wy], origX:sel.x, origY:sel.y,
-                    origW:sel.width, origH:sel.height, origR:sel.radius,
-                    bbox: sel.bbox.slice()};
-          return;
-        }
-      }
-    }
-    const hit = hitBuilding(cx,cy);
-    if (hit) {
-      sendEvent({type:'select', id:hit.id});
-      if (tool==='move') {
-        dragging={type:'move', bid:hit.id, startW:[wx,wy], origX:hit.x, origY:hit.y};
-      }
+  if (role === "building") {
+    const id = Number(target.getAttribute("data-id"));
+    const b = STATE.buildings.find(x => x.id === id);
+    if (!b) return;
+    selected = { type: "building", id };
+    drag = { mode: "move", obj: b, offX: wx - b.x, offY: wy - b.y };
+    svg.setPointerCapture(e.pointerId);
+    render();
+    return;
+  }
+
+  if (role === "boundary") {
+    // Clicking the boundary fill selects it (shows vertex handles) but, per
+    // design, doesn't drag the whole shape — only individual vertices move.
+    selected = { type: "boundary" };
+    render();
+    return;
+  }
+});
+
+svg.addEventListener("pointermove", e => {
+  if (!drag) return;
+  const [wx, wy] = screenToWorld(e.clientX, e.clientY);
+  const obj = drag.obj;
+
+  if (drag.mode === "vertex") {
+    const nx = clamp(snap(wx), -WORLD_W * 0.3, WORLD_W * 1.3);
+    const ny = clamp(snap(wy), -WORLD_H * 0.3, WORLD_H * 1.3);
+    STATE.boundary.points[drag.index] = [nx, ny];
+    render();
+  } else if (drag.mode === "move") {
+    obj.x = clamp(snap(wx - drag.offX), -WORLD_W * 0.3, WORLD_W * 1.3);
+    obj.y = clamp(snap(wy - drag.offY), -WORLD_H * 0.3, WORLD_H * 1.3);
+    render();
+  } else if (drag.mode === "resize") {
+    if (drag.isCircle) {
+      const cx = obj.x + obj.w / 2, cy = obj.y + obj.h / 2;
+      const r = Math.max(MIN_SIZE / 2, Math.hypot(wx - cx, wy - cy));
+      obj.w = obj.h = snap(r * 2);
+      obj.x = cx - obj.w / 2; obj.y = cy - obj.h / 2;
     } else {
-      sendEvent({type:'deselect'});
+      let x0 = obj.x, y0 = obj.y, x1 = obj.x + obj.w, y1 = obj.y + obj.h;
+      const c = drag.corner;
+      if (c.includes("w")) x0 = Math.min(snap(wx), x1 - MIN_SIZE);
+      if (c.includes("e")) x1 = Math.max(snap(wx), x0 + MIN_SIZE);
+      if (c.includes("n")) y0 = Math.min(snap(wy), y1 - MIN_SIZE);
+      if (c.includes("s")) y1 = Math.max(snap(wy), y0 + MIN_SIZE);
+      obj.x = x0; obj.y = y0; obj.w = x1 - x0; obj.h = y1 - y0;
     }
+    render();
   }
 });
 
-canvas.addEventListener('mousemove', e => {
-  const [cx,cy]=getPos(e);
-  const [wx,wy]=c2w(cx,cy);
-  document.getElementById('coords').textContent=`${wx.toFixed(1)}, ${wy.toFixed(1)} m`;
+function endDrag(e) {
+  if (!drag) return;
+  drag = null;
+  try { svg.releasePointerCapture(e.pointerId); } catch (err) {}
+  syncToPython();
+}
+svg.addEventListener("pointerup", endDrag);
+svg.addEventListener("pointercancel", endDrag);
 
-  if (isPanning) {
-    viewX = panOrigin.x + (cx-panStart.x);
-    viewY = panOrigin.y + (cy-panStart.y);
-    draw(); return;
+// ─────────────────────────────────────────────────────────────
+// LOAD INITIAL STATE  (from `data`, passed in once at mount time;
+// reloads/resets from Python work by remounting with a new `key`,
+// not by pushing updates into an already-mounted instance — see
+// app.py, which bumps a version counter into the component key)
+// ─────────────────────────────────────────────────────────────
+function loadState(raw) {
+  let s = raw ? JSON.parse(JSON.stringify(raw)) : null;
+
+  if (!s || !s.boundary) {
+    s = s || {};
+    s.boundary = { preset: "rectangle", sides: 4, points: BOUNDARY_PRESETS.rectangle.map(p => [...p]) };
+  } else if (!Array.isArray(s.boundary.points)) {
+    // Migrate a save file from the previous version of this app, which
+    // stored { preset, x, y, w, h } and re-derived points from a fixed
+    // normalized shape at render time. Re-derive them once here instead.
+    const preset = s.boundary.preset && BOUNDARY_PRESETS[s.boundary.preset]
+      ? s.boundary.preset : "rectangle";
+    const { x = 15, y = 15, w = 150, h = 95 } = s.boundary;
+    const OLD_NORM = {
+      rectangle: [[0,0],[1,0],[1,1],[0,1]],
+      l_shape:   [[0,0],[1,0],[1,0.5],[0.5,0.5],[0.5,1],[0,1]],
+      pentagon:  [[0.5,0],[1,0.38],[0.81,1],[0.19,1],[0,0.38]],
+      hexagon:   [[0.25,0],[0.75,0],[1,0.5],[0.75,1],[0.25,1],[0,0.5]],
+      trapezoid: [[0.18,0],[0.82,0],[1,1],[0,1]],
+    };
+    const pts = OLD_NORM[preset].map(([nx, ny]) => [snap(x + nx * w), snap(y + ny * h)]);
+    s.boundary = { preset, sides: pts.length, points: pts };
   }
+  if (!s.boundary.sides) s.boundary.sides = s.boundary.points.length;
+  if (!s.buildings) s.buildings = [];
 
-  const inBnd = STATE.edit_mode==='edit_boundary';
-
-  if (inBnd && tool==='bnd_move' && bndDrag>=0) {
-    STATE.bnd_verts[bndDrag]=[snapV(wx),snapV(wy)];
-    draw(); return;
-  }
-  if (inBnd && tool==='bnd_free' && freehand) {
-    fhPts.push([wx,wy]); draw(); return;
-  }
-
-  if (!dragging) return;
-
-  const [sx,sy]=dragging.startW;
-  const dx=wx-sx, dy=wy-sy;
-
-  if (dragging.type==='move') {
-    const nx=snapV(dragging.origX+dx), ny=snapV(dragging.origY+dy);
-    // Optimistic local update for smooth feel
-    const b=STATE.buildings.find(b=>b.id===dragging.bid);
-    if (b){ b.x=nx; b.y=ny; }
-    draw();
-  } else if (dragging.type==='resize') {
-    applyResize(dragging, dx, dy);
-    draw();
-  }
-});
-
-canvas.addEventListener('mouseup', e => {
-  const [cx,cy]=getPos(e);
-  const [wx,wy]=c2w(cx,cy);
-
-  if (isPanning) {
-    isPanning=false; canvas.style.cursor='crosshair'; return;
-  }
-
-  const inBnd = STATE.edit_mode==='edit_boundary';
-  if (inBnd && tool==='bnd_move' && bndDrag>=0) {
-    bndDrag=-1; sendEvent({type:'bnd_update', verts:STATE.bnd_verts}); return;
-  }
-  if (inBnd && tool==='bnd_free' && freehand) {
-    freehand=false;
-    if(fhPts.length>4){
-      const step=Math.max(1,Math.floor(fhPts.length/40));
-      STATE.bnd_verts=fhPts.filter((_,i)=>i%step===0);
-    }
-    fhPts=[];
-    sendEvent({type:'bnd_update', verts:STATE.bnd_verts}); return;
-  }
-
-  if (!dragging) return;
-
-  const [sx,sy]=dragging.startW;
-  const dx=wx-sx, dy=wy-sy;
-
-  if (dragging.type==='move') {
-    const nx=snapV(dragging.origX+dx), ny=snapV(dragging.origY+dy);
-    sendEvent({type:'move', id:dragging.bid, x:nx, y:ny});
-  } else if (dragging.type==='resize') {
-    const dims=calcResize(dragging, dx, dy);
-    sendEvent({type:'resize', id:dragging.bid, ...dims});
-  }
-  dragging=null;
-});
-
-// Scroll to zoom
-canvas.addEventListener('wheel', e => {
-  e.preventDefault();
-  const [cx,cy]=getPos(e);
-  const factor = e.deltaY<0 ? 1.1 : 0.91;
-  viewX = cx - (cx-viewX)*factor;
-  viewY = cy - (cy-viewY)*factor;  // y grows downward in canvas, adjust
-  viewScale *= factor;
-  draw();
-}, {passive:false});
-
-// Middle-mouse up
-window.addEventListener('mouseup', e=>{
-  if(e.button===1&&isPanning){isPanning=false;canvas.style.cursor='crosshair';}
-  if(dragging&&e.button===0){
-    // catch mouseup outside canvas
-    dragging=null;
-  }
-});
-
-// Touch support
-canvas.addEventListener('touchstart', e=>{
-  e.preventDefault();
-  const t=e.touches[0];
-  canvas.dispatchEvent(new MouseEvent('mousedown',{button:0,clientX:t.clientX,clientY:t.clientY}));
-},{passive:false});
-canvas.addEventListener('touchmove', e=>{
-  e.preventDefault();
-  const t=e.touches[0];
-  canvas.dispatchEvent(new MouseEvent('mousemove',{button:0,clientX:t.clientX,clientY:t.clientY}));
-},{passive:false});
-canvas.addEventListener('touchend', e=>{
-  e.preventDefault();
-  canvas.dispatchEvent(new MouseEvent('mouseup',{button:0}));
-},{passive:false});
-
-// ═══════════════════════════════════════════════════════════
-// RESIZE LOGIC
-// ═══════════════════════════════════════════════════════════
-function applyResize(drag, dx, dy) {
-  const b=STATE.buildings.find(b=>b.id===drag.bid);
-  if(!b) return;
-  const dims=calcResize(drag,dx,dy);
-  Object.assign(b,dims);
+  STATE = s;
+  nextId = STATE.buildings.reduce((m, b) => Math.max(m, b.id + 1), 1);
+  selected = null;
 }
 
-function calcResize(drag, dx, dy) {
-  const h=drag.handle;
-  let {origX:x, origY:y, origW:w, origH:h_:_h, origR:r} = drag;
-  // for radius-based shapes, use half the min dimension
-  if (r>0) {
-    const delta = (Math.abs(dx)>Math.abs(dy)?dx:dy);
-    return {radius: Math.max(1, snapV(r + delta/2))};
-  }
-  let nx=x, ny=y, nw=w, nh=_h;
-  if(h==='br'){ nw=Math.max(1,snapV(w+dx)); nh=Math.max(1,snapV(_h-dy)); }
-  else if(h==='bl'){ nx=snapV(x+dx); nw=Math.max(1,snapV(w-dx)); nh=Math.max(1,snapV(_h-dy)); }
-  else if(h==='tr'){ nw=Math.max(1,snapV(w+dx)); nh=Math.max(1,snapV(_h+dy)); }
-  else if(h==='tl'){ nx=snapV(x+dx); nw=Math.max(1,snapV(w-dx)); nh=Math.max(1,snapV(_h+dy)); }
-  return {x:nx, y:ny, width:nw, height:nh};
+loadState(data);
+boundarySelect.value = STATE.boundary.preset;
+boundarySidesInput.value = STATE.boundary.sides;
+render();
+// Echo the freshly-loaded state straight back to Python so its
+// session_state (and derived stats) stay consistent with what's
+// now on screen, instead of waiting for the first user edit.
+syncToPython();
+
 }
-
-// ═══════════════════════════════════════════════════════════
-// COMMUNICATION WITH STREAMLIT
-// ═══════════════════════════════════════════════════════════
-function sendEvent(obj) {
-  const el=document.getElementById('event_out');
-  if(el){ el.value=JSON.stringify(obj); el.dispatchEvent(new Event('input',{bubbles:true})); }
-}
-
-// Receive state from Python via hidden input
-function applyState(jsonStr) {
-  try {
-    const newState=JSON.parse(jsonStr);
-    STATE=newState;
-    // update grid slider to match session state
-    const gs=document.getElementById('gridSlider');
-    if(gs) gs.value=STATE.snap_grid||1;
-    document.getElementById('gridVal').textContent=STATE.snap_grid||1;
-    gridSize=STATE.snap_grid||1;
-    // show/hide toolbar groups
-    const inBnd=STATE.edit_mode==='edit_boundary';
-    document.getElementById('grp-struct').style.display=inBnd?'none':'inline';
-    document.getElementById('grp-bnd').style.display=inBnd?'inline':'none';
-    if(inBnd && !tool.startsWith('bnd') && tool!=='pan') setTool('bnd_move');
-    if(!inBnd && tool.startsWith('bnd')) setTool('select');
-    draw();
-  } catch(err) { console.error('applyState error', err); }
-}
-
-// Watch the hidden input for state pushes
-const obs=new MutationObserver(()=>{
-  const el=document.getElementById('state_in');
-  if(el&&el.value) applyState(el.value);
-});
-const stateEl=document.getElementById('state_in');
-if(stateEl) obs.observe(stateEl, {attributes:true, attributeFilter:['value']});
-// Also poll in case mutation fires before inject
-setInterval(()=>{
-  const el=document.getElementById('state_in');
-  if(el&&el.value&&el.value!==applyState._last){
-    applyState._last=el.value; applyState(el.value);
-  }
-},200);
-
-// Initial state
-setTimeout(()=>{
-  const el=document.getElementById('state_in');
-  if(el&&el.value) applyState(el.value);
-  resetView();
-}, 50);
-
-setTool('select');
-</script>
-
-<!-- Hidden IO elements written/read by Streamlit via st.text_input -->
-<input type="hidden" id="state_in"  value="STATE_JSON">
-<input type="hidden" id="event_out" value="">
-</body>
-</html>
 """
 
+_site_canvas = st.components.v2.component(
+    "site_canvas",
+    html=_CANVAS_HTML,
+    css=_CANVAS_CSS,
+    js=_CANVAS_JS,
+)
 
-def render_canvas() -> Optional[dict]:
-    """
-    Render the interactive canvas. Returns a parsed event dict if the user
-    performed an action (move, resize, select, bnd_update, etc.), else None.
-    """
-    payload = _build_canvas_payload()
-    html_src = CANVAS_HTML.replace("STATE_JSON", payload.replace('"', "&quot;"))
 
-    # event_out is a hidden input whose value the JS sets; we surface it via
-    # a Streamlit text_input with visibility:hidden so Streamlit can read it.
-    event_raw = components.html(
-        html_src + """
-        <script>
-        // Wire the hidden event_out → parent Streamlit text input
-        document.getElementById('event_out').addEventListener('input', function() {
-          window.parent.postMessage({type:'streamlit:setComponentValue', value:this.value}, '*');
-        });
-        </script>
-        """,
-        height=700,
-        scrolling=False,
+def site_canvas(initial_state: dict, version: int):
+    # `key` includes `version` so that bumping version (on reset/load) forces
+    # Streamlit to remount the component with the freshly-passed `data`,
+    # rather than reusing an already-mounted instance that already consumed
+    # its initial data at first mount.
+    return _site_canvas(
+        data=initial_state,
+        default={"layout": initial_state},
+        key=f"canvas-{version}",
+        height=620,
+        on_layout_change=lambda: None,
     )
-    return None   # events are handled via st.text_input below
 
 
 # ─────────────────────────────────────────────────────────────
-# PROCESS CANVAS EVENTS FROM JS
+# DEFAULT STATE
 # ─────────────────────────────────────────────────────────────
-def process_canvas_event(raw: str) -> bool:
-    """Parse and apply a canvas event. Returns True if state changed."""
-    if not raw or not raw.strip().startswith("{"):
-        return False
-    try:
-        ev = json.loads(raw)
-    except Exception:
-        return False
+DEFAULT_STATE = {
+    "boundary": {
+        "preset": "rectangle",
+        "sides": 4,
+        "points": [[15, 15], [165, 15], [165, 110], [15, 110]],
+    },
+    "buildings": [],
+}
 
-    t = ev.get("type", "")
 
-    if t == "select":
-        bid = ev["id"]
-        if bid != st.session_state.selected_id:
-            st.session_state.selected_id = bid
-            return True
+def _init_state():
+    if "site_state" not in st.session_state:
+        st.session_state.site_state = copy.deepcopy(DEFAULT_STATE)
+    if "version" not in st.session_state:
+        st.session_state.version = 1
+    if "_last_upload_id" not in st.session_state:
+        st.session_state._last_upload_id = None
 
-    elif t == "deselect":
-        if st.session_state.selected_id is not None:
-            st.session_state.selected_id = None
-            return True
 
-    elif t == "move":
-        bid = ev["id"]
-        if bid in st.session_state.buildings:
-            b = st.session_state.buildings[bid]
-            b["x"] = float(ev["x"])
-            b["y"] = float(ev["y"])
-            # Road: shift waypoints too
-            if b.get("shape") == "Road" and "waypoints" in b:
-                ox = float(ev.get("orig_x", b["x"]))
-                oy = float(ev.get("orig_y", b["y"]))
-                dx, dy = b["x"] - ox, b["y"] - oy
-                b["waypoints"] = [[p[0]+dx, p[1]+dy] for p in b["waypoints"]]
-            return True
-
-    elif t == "resize":
-        bid = ev["id"]
-        if bid in st.session_state.buildings:
-            b = st.session_state.buildings[bid]
-            for k in ("x","y","width","height","radius"):
-                if k in ev:
-                    b[k] = float(ev[k])
-            # clamp stem dimensions for L/T shapes
-            if b["shape"] == "L-Shape":
-                b["stem_w"] = min(b.get("stem_w", b["width"]/2), b["width"])
-                b["stem_h"] = min(b.get("stem_h", b["height"]/2), b["height"])
-            return True
-
-    elif t == "bnd_update":
-        verts = ev.get("verts", [])
-        if len(verts) >= 3:
-            st.session_state.site_vertices = [tuple(v) for v in verts]
-            return True
-
-    elif t == "bnd_reset":
-        st.session_state.site_vertices = list(DEFAULT_BOUNDARY)
-        return True
-
-    elif t == "grid":
-        v = float(ev.get("value", 1))
-        if v != st.session_state.snap_grid:
-            st.session_state.snap_grid = v
-            return True
-
-    return False
-
+_init_state()
 
 # ─────────────────────────────────────────────────────────────
-# SIDEBAR
+# SIDEBAR (part 1): load / reset — these must run *before* the canvas
+# call below, so a version bump takes effect in the same click.
 # ─────────────────────────────────────────────────────────────
-def render_sidebar() -> None:
-    st.sidebar.markdown(
-        "<h2 style='margin-bottom:0;color:#fff'>🏗️ Site Planner</h2>"
-        "<p style='font-size:.75rem;color:#8BAACC;margin-top:2px'>v3.0 · Construction Layout Tool</p>",
-        unsafe_allow_html=True,
-    )
-    st.sidebar.divider()
-
-    st.sidebar.subheader("🛡️ Safety")
-    st.session_state.safety_margin = st.sidebar.slider(
-        "Clearance between structures (m)", 0.0, 10.0,
-        st.session_state.safety_margin, 0.5,
-        help="Minimum gap enforced between any two structures")
-    st.session_state.boundary_threshold = st.sidebar.slider(
-        "Boundary setback (m)", 0.0, 15.0,
-        st.session_state.boundary_threshold, 0.5,
-        help="Structures must be set back this far from the boundary")
-    st.sidebar.divider()
-
-    st.sidebar.subheader("⚙️ Canvas")
-    st.session_state.snap_grid = st.sidebar.select_slider(
-        "Snap-to-grid (m)", [0.0, 0.5, 1.0, 2.0, 5.0, 10.0],
-        st.session_state.snap_grid, help="0 = free placement")
-    st.session_state.show_safety_zones = st.sidebar.toggle(
-        "Safety buffer zones", st.session_state.show_safety_zones)
-    st.session_state.show_utilisation = st.sidebar.toggle(
-        "Utilisation panel", st.session_state.show_utilisation)
-    st.sidebar.divider()
-
-    st.sidebar.subheader("💾 Save / Load")
-    st.sidebar.download_button(
-        "📥 Export JSON", data=export_state(),
-        file_name="site_layout.json", mime="application/json",
-        use_container_width=True)
-    up = st.sidebar.file_uploader("📂 Import JSON", type="json",
-                                   label_visibility="visible")
-    if up:
-        try:
-            import_state(up.read().decode())
-            st.success("Layout imported.")
-            st.rerun()
-        except Exception as ex:
-            st.sidebar.error(f"Import failed: {ex}")
-
-    st.sidebar.divider()
-    s = utilisation_stats()
-    m1, m2, m3 = st.sidebar.columns(3)
-    m1.metric("Structs", s["n_buildings"])
-    m2.metric("Area", f"{s['site_area']:.0f}m²")
-    m3.metric("Used", f"{s['utilisation_pct']:.0f}%")
-
-
-# ─────────────────────────────────────────────────────────────
-# BUILDING FORM
-# ─────────────────────────────────────────────────────────────
-def render_add_edit_form(existing_id: Optional[str] = None) -> None:
-    is_edit = existing_id is not None
-    b = st.session_state.buildings.get(existing_id, {}) if is_edit else {}
-
-    st.subheader("✏️ Edit Structure" if is_edit else "➕ Add Structure")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        name     = st.text_input("Name",
-                     value=b.get("name", f"Structure {len(st.session_state.buildings)+1}"))
-        category = st.selectbox("Category", list(CATEGORY_COLORS),
-                     index=list(CATEGORY_COLORS).index(b.get("category","Office / Admin")))
-        color    = st.color_picker("Colour", value=b.get("color", CATEGORY_COLORS[category]))
-
-    with col2:
-        shape = st.selectbox("Shape", SHAPE_TYPES,
-                    index=SHAPE_TYPES.index(b.get("shape","Rectangle")))
-        angle = st.slider("Rotation (°)", -180, 180, int(b.get("angle",0)), 5)
-        notes = st.text_area("Notes", value=b.get("notes",""), height=68)
-
+with st.sidebar:
+    st.markdown("### 🏗️ Site Planner")
+    st.caption("Drag shapes onto the canvas to build your layout.")
     st.divider()
-    g = st.session_state.snap_grid
-    params: dict = {}
 
-    if shape == "Rectangle":
-        c1,c2,c3,c4 = st.columns(4)
-        params["x"]      = snap(c1.number_input("X (m)",      value=float(b.get("x",10)),     step=max(g,.1)), g)
-        params["y"]      = snap(c2.number_input("Y (m)",      value=float(b.get("y",10)),     step=max(g,.1)), g)
-        params["width"]  = snap(c3.number_input("Width (m)",  value=float(b.get("width",20)), min_value=1., step=max(g,.1)), g)
-        params["height"] = snap(c4.number_input("Height (m)", value=float(b.get("height",15)),min_value=1., step=max(g,.1)), g)
-
-    elif shape == "L-Shape":
-        c1,c2,c3,c4 = st.columns(4)
-        params["x"]      = snap(c1.number_input("X",      value=float(b.get("x",10)),     step=max(g,.1)), g)
-        params["y"]      = snap(c2.number_input("Y",      value=float(b.get("y",10)),     step=max(g,.1)), g)
-        params["width"]  = snap(c3.number_input("Width",  value=float(b.get("width",20)), min_value=2., step=max(g,.1)), g)
-        params["height"] = snap(c4.number_input("Height", value=float(b.get("height",15)),min_value=2., step=max(g,.1)), g)
-        c5,c6 = st.columns(2)
-        params["stem_w"] = snap(c5.number_input("Stem W (m)", value=float(b.get("stem_w",10)),min_value=1.,step=max(g,.1)), g)
-        params["stem_h"] = snap(c6.number_input("Stem H (m)", value=float(b.get("stem_h",8)), min_value=1.,step=max(g,.1)), g)
-
-    elif shape == "T-Shape":
-        c1,c2,c3,c4 = st.columns(4)
-        params["x"]      = snap(c1.number_input("X",       value=float(b.get("x",10)),     step=max(g,.1)), g)
-        params["y"]      = snap(c2.number_input("Y",       value=float(b.get("y",10)),     step=max(g,.1)), g)
-        params["width"]  = snap(c3.number_input("Width",   value=float(b.get("width",30)), min_value=3., step=max(g,.1)), g)
-        params["height"] = snap(c4.number_input("Height",  value=float(b.get("height",20)),min_value=2., step=max(g,.1)), g)
-        params["cap_h"]  = snap(st.number_input("Cap height (m)", value=float(b.get("cap_h",8)),min_value=1.,step=max(g,.1)), g)
-
-    elif shape in ("Hexagon","Circle","Semicircle"):
-        c1,c2,c3 = st.columns(3)
-        params["x"]      = snap(c1.number_input("Centre X", value=float(b.get("x",20)), step=max(g,.1)), g)
-        params["y"]      = snap(c2.number_input("Centre Y", value=float(b.get("y",20)), step=max(g,.1)), g)
-        params["radius"] = snap(c3.number_input("Radius (m)", value=float(b.get("radius",8)),min_value=1.,step=max(g,.1)), g)
-        if shape == "Semicircle":
-            params["flat_angle"] = st.slider("Flat-edge direction (°)",0,360,int(b.get("flat_angle",0)),15)
-
-    elif shape == "Road":
-        st.info("Enter waypoints as X,Y pairs (one per line). Minimum 2 points.")
-        default_wp = b.get("waypoints",[(10,10),(40,10),(40,40)])
-        raw_wp = st.text_area("Waypoints",
-            value="\n".join(f"{p[0]},{p[1]}" for p in default_wp), height=100)
-        parsed_wp: list = []
-        for line in raw_wp.strip().splitlines():
+    uploaded = st.file_uploader("📂 Load layout (JSON)", type="json")
+    if uploaded is not None:
+        upload_id = (uploaded.name, uploaded.size)
+        if upload_id != st.session_state._last_upload_id:
             try:
-                px_, py_ = line.split(",")
-                parsed_wp.append((float(px_.strip()), float(py_.strip())))
-            except ValueError: pass
-        params["waypoints"]  = parsed_wp
-        params["road_width"] = st.slider("Road width (m)", 2.0, 20.0, float(b.get("road_width",5.0)), 0.5)
-        params["x"] = parsed_wp[0][0] if parsed_wp else 0
-        params["y"] = parsed_wp[0][1] if parsed_wp else 0
+                loaded = json.loads(uploaded.read())
+                if "boundary" in loaded and "buildings" in loaded:
+                    st.session_state.site_state = loaded
+                    st.session_state.version += 1
+                    st.session_state._last_upload_id = upload_id
+                else:
+                    st.error("That JSON doesn't look like a site layout.")
+            except Exception as e:
+                st.error(f"Couldn't read that file: {e}")
 
-    elif shape == "Custom Polygon":
-        st.info("Enter X,Y pairs (one per line).")
-        default_pts = b.get("custom_pts",[(10,10),(30,10),(30,25),(10,25)])
-        raw_pts = st.text_area("Vertices",
-            value="\n".join(f"{p[0]},{p[1]}" for p in default_pts), height=110)
-        parsed_pts: list = []
-        for line in raw_pts.strip().splitlines():
-            try:
-                px_, py_ = line.split(",")
-                parsed_pts.append((float(px_.strip()), float(py_.strip())))
-            except ValueError: pass
-        params["custom_pts"] = parsed_pts
-        params["x"] = parsed_pts[0][0] if parsed_pts else 0
-        params["y"] = parsed_pts[0][1] if parsed_pts else 0
-
-    params.update(shape=shape, angle=float(angle),
-                  name=name, category=category, color=color, notes=notes)
-
-    preview = building_polygon(params)
-    if not preview.is_empty:
-        bb = preview.bounds
-        col_prev, col_bnd, col_clr = st.columns(3)
-        col_prev.caption(f"**Area:** {preview.area:.1f} m²  ·  **Box:** {bb[2]-bb[0]:.1f}×{bb[3]-bb[1]:.1f} m")
-        dummy_id = existing_id or "__preview__"
-        col_bnd.caption("Boundary: " + ("✅ OK" if check_boundary(preview) else "⚠️ Breaches setback"))
-        hits = check_collisions(dummy_id, preview)
-        col_clr.caption("Clearance: " + ("✅ Clear" if not hits else f"⚠️ {', '.join(hits)}"))
-
-    sc, cc, *_ = st.columns([1,1,3])
-    if sc.button("💾 Save" if is_edit else "➕ Place", type="primary", use_container_width=True):
-        bid  = existing_id or str(uuid.uuid4())[:8]
-        poly = building_polygon(params)
-        warns  = []
-        if check_collisions(bid, poly): warns.append("⚠️ Clearance violated")
-        if not check_boundary(poly):    warns.append("⚠️ Breaches boundary setback")
-        if warns and not st.session_state.get("_force"):
-            for w in warns: st.warning(w)
-            st.session_state["_force"] = True
-            st.info("Press **Save** again to override.")
-            return
-        st.session_state.pop("_force", None)
-        st.session_state.buildings[bid] = params
-        st.session_state.selected_id    = bid
-        st.session_state.edit_mode      = "view"
-        st.success(f"✅ '{name}' {'updated' if is_edit else 'placed'}.")
-        st.rerun()
-
-    if cc.button("Cancel", use_container_width=True):
-        st.session_state.edit_mode = "view"
-        st.session_state.pop("_force", None)
-        st.rerun()
-
-
-# ─────────────────────────────────────────────────────────────
-# BOUNDARY TEXT / PRESET PANEL  (no canvas tab — canvas IS the editor)
-# ─────────────────────────────────────────────────────────────
-def render_boundary_panel() -> None:
-    st.subheader("🗺️ Edit Site Boundary")
-    st.info("Use the canvas below — **Vertex / Add / Delete / Freehand** modes appear in the toolbar. Pan with 🖐 or scroll to zoom.")
-
-    tab_text, tab_preset = st.tabs(["⌨️ Type Coordinates", "📐 Presets"])
-
-    with tab_text:
-        raw = st.text_area(
-            "Vertices (X,Y per line)",
-            value="\n".join(f"{p[0]},{p[1]}" for p in st.session_state.site_vertices),
-            height=180,
-        )
-        parsed_text: list = []
-        for line in raw.strip().splitlines():
-            try:
-                px_, py_ = line.split(",")
-                parsed_text.append((float(px_.strip()), float(py_.strip())))
-            except ValueError: pass
-        if len(parsed_text) >= 3:
-            st.caption(f"Area: **{Polygon(parsed_text).area:.1f} m²** · {len(parsed_text)} vertices")
-        if st.button("✅ Apply", type="primary"):
-            if len(parsed_text) < 3:
-                st.error("Need ≥ 3 valid points.")
-            else:
-                st.session_state.site_vertices = parsed_text
-                st.session_state.edit_mode = "view"
-                st.rerun()
-
-    with tab_preset:
-        presets: dict[str,list] = {
-            "Default (irregular)":  list(DEFAULT_BOUNDARY),
-            "Rectangle 120×80":     [(0,0),(120,0),(120,80),(0,80)],
-            "Large square 150×150": [(0,0),(150,0),(150,150),(0,150)],
-            "L-shaped":             [(0,0),(100,0),(100,40),(60,40),(60,80),(0,80)],
-            "T-shaped":             [(20,0),(80,0),(80,40),(100,40),(100,60),(80,60),
-                                     (80,90),(20,90),(20,60),(0,60),(0,40),(20,40)],
-            "Trapezoid":            [(10,0),(110,0),(120,80),(0,80)],
-            "Pentagon site":        [(50,0),(100,30),(85,90),(15,90),(0,30)],
-            "Oval (approx)":        [(50+40*math.cos(2*math.pi*i/24),
-                                      40+28*math.sin(2*math.pi*i/24)) for i in range(24)],
-        }
-        choice = st.selectbox("Select preset", list(presets))
-        st.caption(f"Area: {Polygon(presets[choice]).area:.1f} m² · {len(presets[choice])} vertices")
-        if st.button("Load preset", type="primary"):
-            st.session_state.site_vertices = presets[choice]
-            st.session_state.edit_mode = "view"
-            st.rerun()
-
-    if st.button("✕ Done editing boundary", use_container_width=True):
-        st.session_state.edit_mode = "view"
-        st.rerun()
-
-
-# ─────────────────────────────────────────────────────────────
-# STRUCTURE TABLE
-# ─────────────────────────────────────────────────────────────
-def render_table() -> None:
-    if not st.session_state.buildings:
-        st.markdown(
-            "<div style='text-align:center;padding:1.5rem;background:#F8FAFD;"
-            "border-radius:10px;border:1.5px dashed #BDD0E5;color:#7A9BB5'>"
-            "<p style='font-size:1.5rem;margin:0'>🏗️</p>"
-            "<p style='margin:4px 0 0'>No structures yet — click <b>➕ Add Structure</b></p>"
-            "</div>",
-            unsafe_allow_html=True,
-        )
-        return
-
-    rows = []
-    for bid, b in st.session_state.buildings.items():
-        poly = building_polygon(b)
-        rows.append({
-            "":          "⭐" if bid == st.session_state.selected_id else "",
-            "Name":      b["name"],
-            "Category":  b["category"],
-            "Shape":     b["shape"],
-            "Area (m²)": f"{poly.area:.1f}",
-            "Rot":       f"{b.get('angle',0):.0f}°",
-            "Bnd":       "✅" if check_boundary(poly) else "⚠️",
-            "Clr":       "✅" if not check_collisions(bid, poly) else "⚠️",
-        })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, height=190, hide_index=True)
-
-    all_names = {b["name"]: bid for bid, b in st.session_state.buildings.items()}
-    sc, ec, dc = st.columns([3,1,1])
-    sel = sc.selectbox("Structure", ["— select —"]+list(all_names), label_visibility="collapsed")
-    if sel != "— select —":
-        sid = all_names[sel]
-        if ec.button("✏️ Edit", use_container_width=True):
-            st.session_state.selected_id = sid
-            st.session_state.edit_mode   = "edit_building"
-            st.rerun()
-        if dc.button("🗑️ Delete", use_container_width=True):
-            del st.session_state.buildings[sid]
-            if st.session_state.selected_id == sid:
-                st.session_state.selected_id = None
-            st.rerun()
-
-
-# ─────────────────────────────────────────────────────────────
-# UTILISATION PANEL
-# ─────────────────────────────────────────────────────────────
-def render_utilisation() -> None:
-    s = utilisation_stats()
-    c1,c2,c3,c4 = st.columns(4)
-    c1.metric("Site Area",   f"{s['site_area']:.0f} m²")
-    c2.metric("Built Area",  f"{s['inside_area']:.0f} m²")
-    c3.metric("Free Area",   f"{s['free_area']:.0f} m²")
-    c4.metric("Utilisation", f"{s['utilisation_pct']:.1f}%")
-    pct = min(s["utilisation_pct"]/100, 1.0)
-    if pct > .9:   bar,icon,msg = "#E74C3C","🔴","Site nearly full"
-    elif pct > .75: bar,icon,msg = "#E07B39","🟡","Getting busy"
-    else:           bar,icon,msg = "#27AE60","🟢","Plenty of space"
-    st.markdown(
-        f'<div style="background:#DDE6F0;border-radius:6px;height:12px;overflow:hidden">'
-        f'<div style="background:{bar};width:{pct*100:.1f}%;height:100%;border-radius:6px;transition:width .4s"></div></div>'
-        f'<p style="font-size:.78rem;color:#555;margin:4px 0 0">{icon} {s["n_buildings"]} structure(s) &nbsp;·&nbsp; {msg}</p>',
-        unsafe_allow_html=True,
-    )
-
+    if st.button("🔄 Reset layout", use_container_width=True):
+        st.session_state.site_state = copy.deepcopy(DEFAULT_STATE)
+        st.session_state.version += 1
+        st.session_state._last_upload_id = None
 
 # ─────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────
-def main() -> None:
-    render_sidebar()
+st.markdown("## 🏗️ Construction Site Planner")
 
-    st.markdown("## 🏗️ Construction Site Planner")
+result = site_canvas(
+    initial_state=st.session_state.site_state,
+    version=st.session_state.version,
+)
+if result is not None and result.get("layout") is not None:
+    st.session_state.site_state = result["layout"]
 
-    # ── Toolbar ───────────────────────────────────────────
-    t1,t2,t3,t4 = st.columns([3,3,2,2])
-    if t1.button("➕ Add Structure", type="primary", use_container_width=True):
-        st.session_state.edit_mode   = "add"
-        st.session_state.selected_id = None
-        st.session_state.pop("_force", None)
-    if t2.button("🗺️ Edit Boundary", use_container_width=True):
-        st.session_state.edit_mode = "edit_boundary"
-    if t3.button("🗑️ Clear All", use_container_width=True):
-        st.session_state["_confirm_clear"] = True
-    if t4.button("🔄 Reset", use_container_width=True):
-        st.session_state["_confirm_reset"] = True
-
-    if st.session_state.pop("_confirm_clear", False):
-        st.warning("Remove all structures?")
-        cy, cn = st.columns(2)
-        if cy.button("Yes, clear all", type="primary", use_container_width=True):
-            st.session_state.buildings = {}; st.session_state.selected_id = None; st.rerun()
-        if cn.button("Cancel", use_container_width=True): st.rerun()
-
-    if st.session_state.pop("_confirm_reset", False):
-        st.warning("Reset everything — structures **and** boundary?")
-        ry, rn = st.columns(2)
-        if ry.button("Yes, reset", type="primary", use_container_width=True):
-            for k in ["buildings","site_vertices","selected_id","edit_mode"]: del st.session_state[k]
-            st.rerun()
-        if rn.button("Cancel", use_container_width=True): st.rerun()
-
-    # ── Active side panel ─────────────────────────────────
-    if st.session_state.edit_mode == "add":
-        st.divider(); render_add_edit_form(); st.divider()
-    elif st.session_state.edit_mode == "edit_building" and st.session_state.selected_id:
-        st.divider(); render_add_edit_form(st.session_state.selected_id); st.divider()
-    elif st.session_state.edit_mode == "edit_boundary":
-        st.divider(); render_boundary_panel(); st.divider()
-
-    # ── Utilisation ───────────────────────────────────────
-    if st.session_state.show_utilisation:
-        render_utilisation()
-        st.divider()
-
-    # ── Canvas event bridge ───────────────────────────────
-    # We use a hidden text_input to ferry events from the iframe to Python.
-    # The canvas JS calls sendEvent() which fires window.parent.postMessage;
-    # Streamlit's component bridge turns that into the component return value.
-    # Because components.html() can't return values in Streamlit, we instead
-    # use a visible (but styled-invisible) text_input that the user pastes into
-    # via a postMessage listener in a tiny companion component.
-    ev_raw = st.text_input(
-        "canvas_event",
-        value=st.session_state.get("canvas_event",""),
-        key="canvas_event_input",
-        label_visibility="collapsed",
-    )
-    if ev_raw and ev_raw != st.session_state.get("_last_ev",""):
-        st.session_state["_last_ev"] = ev_raw
-        if process_canvas_event(ev_raw):
-            st.rerun()
-
-    # ── Canvas ────────────────────────────────────────────
-    payload = _build_canvas_payload()
-
-    # Embed the full canvas + a postMessage bridge that writes into the
-    # Streamlit text_input above. We inject the payload as JS data.
-    canvas_html = CANVAS_HTML.replace(
-        'value="STATE_JSON"',
-        f'value=\'{payload.replace(chr(39), "&apos;")}\''
+# ─────────────────────────────────────────────────────────────
+# SIDEBAR (part 2): download — placed *after* the canvas call above
+# so it always packages the freshest state, never a stale one.
+# ─────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.divider()
+    st.download_button(
+        "💾 Download layout (JSON)",
+        data=json.dumps(st.session_state.site_state, indent=2),
+        file_name="site_layout.json",
+        mime="application/json",
+        use_container_width=True,
     )
 
-    # Add the postMessage → text_input bridge
-    bridge = """
-<script>
-window.addEventListener('message', function(e){
-  if(e.data && e.data.type==='streamlit:setComponentValue'){
-    // Find the hidden text input by label search and update it
-    const inputs = window.parent.document.querySelectorAll('input[type="text"]');
-    for(const inp of inputs){
-      const label = inp.closest('[data-testid="stTextInput"]');
-      if(label){
-        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.parent.HTMLInputElement.prototype,'value').set;
-        nativeInputValueSetter.call(inp, e.data.value);
-        inp.dispatchEvent(new Event('input',{bubbles:true}));
-        break;
-      }
-    }
-  }
-});
-</script>
-"""
-    components.html(canvas_html + bridge, height=720, scrolling=False)
+# ── Summary metrics (derived straight from what the component sent back) ──
+state = st.session_state.site_state
+site_area = state.get("site_area")
+built_area = state.get("built_area")
+util_pct = state.get("utilization_pct")
 
-    # ── Structure table ───────────────────────────────────
-    st.subheader("📋 Structures")
-    render_table()
-
-
-if __name__ == "__main__":
-    main()
+if site_area is not None:
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Site area", f"{site_area:.0f} m²")
+    c2.metric("Built area", f"{built_area:.0f} m²")
+    c3.metric("Utilisation", f"{util_pct:.1f}%")
+    c4.metric("Buildings", f"{len(state.get('buildings', []))}")
