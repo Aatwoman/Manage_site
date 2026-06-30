@@ -1,5 +1,5 @@
 """
-Construction Site Planner  ·  v7.3 (Stable Mounts & 100k Max Area Limit)
+Construction Site Planner  ·  v7.4 (Bulletproof DOM Initialization)
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -126,11 +126,14 @@ _CANVAS_CSS = """
 
 _CANVAS_JS = """
 export default function(component) {
-const { data, parentElement, setStateValue } = component;
+const { data, setStateValue } = component;
 
-// Ensure JS only evaluates once per component mount to prevent infinite reruns and lag
-if (parentElement.dataset.initialized === "true") return;
-parentElement.dataset.initialized = "true";
+// Grab the canvas directly from the DOM.
+const svg = document.getElementById("canvas");
+
+// Ensure JS only evaluates once per component mount (prevents loop/lag)
+if (!svg || svg.dataset.initialized === "true") return;
+svg.dataset.initialized = "true";
 
 // ─────────────────────────────────────────────────────────────
 // STATE & INFINITE CANVAS VIEWPORT CONFIG
@@ -144,7 +147,6 @@ let viewX = 0, viewY = 0, viewW = WORLD_W, viewH = WORLD_H;
 
 let STATE = { boundary: null, buildings: [] };
 let nextId = 1, selected = null, drag = null;
-const svg = parentElement.querySelector("#canvas");
 
 function snap(v) { return Math.round(v / SNAP) * SNAP; }
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -368,13 +370,14 @@ function renderSidePanel() {
   const siteArea = shoelaceArea(STATE.boundary.points);
   const builtArea = STATE.buildings.reduce((s, b) => s + (b.shape==="circle"?Math.PI*(b.w/2)*(b.w/2):shoelaceArea(shapePoints(b))), 0);
   
-  parentElement.querySelector("#statsRow").innerHTML = `
+  document.getElementById("statsRow").innerHTML = `
     <div class="stat">Site area<b>${siteArea.toFixed(0)} m&sup2;</b></div>
     <div class="stat">Built area<b>${builtArea.toFixed(0)} m&sup2;</b></div>
     <div class="stat">Utilisation<b>${siteArea>0?((builtArea/siteArea)*100).toFixed(1):0}%</b></div>
   `;
 
-  const bldListEl = parentElement.querySelector("#bldList"); bldListEl.innerHTML = "";
+  const bldListEl = document.getElementById("bldList"); 
+  bldListEl.innerHTML = "";
   if (STATE.buildings.length === 0) { bldListEl.innerHTML = '<div class="empty-list">No shapes yet.</div>'; return; }
   
   STATE.buildings.forEach(b => {
@@ -432,8 +435,8 @@ function syncToPython() {
 // ─────────────────────────────────────────────────────────────
 // INTERACTION CONTROLS
 // ─────────────────────────────────────────────────────────────
-parentElement.querySelector("#snapGrid").addEventListener("change", e => { SNAP = e.target.checked ? 5 : 1; });
-parentElement.querySelector("#clearBtn").addEventListener("click", () => {
+document.getElementById("snapGrid").addEventListener("change", e => { SNAP = e.target.checked ? 5 : 1; });
+document.getElementById("clearBtn").addEventListener("click", () => {
   if(confirm("Clear layout canvas?")) { STATE.buildings = []; selected = null; render(); syncToPython(); }
 });
 
@@ -469,7 +472,7 @@ function addBuilding(shape, worldX, worldY) {
   render(); syncToPython();
 }
 
-parentElement.querySelectorAll(".shape-btn[data-shape]").forEach(btn => {
+document.querySelectorAll(".shape-btn[data-shape]").forEach(btn => {
   btn.addEventListener("click", () => addBuilding(btn.dataset.shape));
   btn.addEventListener("dragstart", e => { e.dataTransfer.setData("text", btn.dataset.shape); });
 });
@@ -480,8 +483,8 @@ svg.addEventListener("drop", e => {
   addBuilding(shape, wx, wy);
 });
 
-const bSel = parentElement.querySelector("#boundarySelect");
-const bSides = parentElement.querySelector("#boundarySides");
+const bSel = document.getElementById("boundarySelect");
+const bSides = document.getElementById("boundarySides");
 bSel.addEventListener("change", () => {
   const p = bSel.value; STATE.boundary = { preset: p, sides: BOUNDARY_PRESETS[p].length, points: BOUNDARY_PRESETS[p].map(x => [...x]) };
   bSides.value = STATE.boundary.sides; render(); syncToPython();
@@ -544,11 +547,10 @@ svg.addEventListener("pointermove", e => {
   const obj = drag.obj;
 
   if (drag.mode === "vertex") {
-    // Math clamp to prevent dragging vertex so far out that area exceeds 100,000
     const oldPt = STATE.boundary.points[drag.index];
     STATE.boundary.points[drag.index] = [snap(wx), snap(wy)];
     if (shoelaceArea(STATE.boundary.points) > MAX_AREA) {
-       STATE.boundary.points[drag.index] = oldPt; // Hit max area limit, reject drag
+       STATE.boundary.points[drag.index] = oldPt;
     }
   } else if (drag.mode === "move") {
     obj.x = snap(wx - drag.offX); obj.y = snap(wy - drag.offY);
