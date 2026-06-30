@@ -1,5 +1,5 @@
 """
-Construction Site Planner  ·  v7.1 (Fixed JS Comment Syntax Error)
+Construction Site Planner  ·  v7.2 (Fixed Invisible Canvas Remount Bug)
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -81,7 +81,7 @@ _CANVAS_CSS = """
 
   .hint { font-size: 12px; color: #607182; margin-bottom: 10px; background: #EBF2FA; padding: 6px 10px; border-radius: 6px; display: inline-block; }
 
-  #main { display: flex; gap: 14px; align-items: flex-start; height: 710px; }
+  #main { display: flex; gap: 14px; align-items: flex-start; height: 680px; }
 
   #canvasWrap {
     flex: 1 1 auto; height: 100%; border: 1px solid #C7D4E2; border-radius: 10px; background: #fff;
@@ -121,17 +121,15 @@ _CANVAS_CSS = """
 
   .bld-row .meta { font-size: 11px; color: #8094A8; margin-bottom: 2px; padding-left: 2px; }
   .empty-list { font-size: 13px; color: #95A5B5; text-align: center; padding: 30px 4px; }
+  .warn-badge { color: #E74C3C; font-weight: 600; }
 """
 
 _CANVAS_JS = """
 export default function(component) {
 const { data, parentElement, setStateValue } = component;
 
-if (window.__canvas_initialized__) return;
-window.__canvas_initialized__ = true;
-
 // ─────────────────────────────────────────────────────────────
-// STATE & INFINITE CANVAS VIEWPORT
+// STATE & INFINITE CANVAS VIEWPORT CONFIG
 // ─────────────────────────────────────────────────────────────
 const WORLD_W = 200, WORLD_H = 130;
 const MIN_SIZE = 4;
@@ -148,6 +146,15 @@ function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
 function updateViewBox() {
   svg.setAttribute("viewBox", `${viewX} ${viewY} ${viewW} ${viewH}`);
+}
+
+function screenToWorld(clientX, clientY) {
+  const pt = svg.createSVGPoint();
+  pt.x = clientX; pt.y = clientY;
+  const ctm = svg.getScreenCTM();
+  if (!ctm) return [clientX, clientY];
+  const p = pt.matrixTransform(ctm.inverse());
+  return [p.x, p.y];
 }
 
 function getBBox(pts) {
@@ -204,7 +211,7 @@ function shoelaceArea(pts) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// BOUNDARIES & SHAPES
+// BOUNDARIES & SHAPES DEFINITIONS
 // ─────────────────────────────────────────────────────────────
 const BOUNDARY_DEFAULT_CX = 90, BOUNDARY_DEFAULT_CY = 65, BOUNDARY_DEFAULT_R = 55;
 function genNGon(n, cx, cy, r) {
@@ -251,7 +258,7 @@ function shapePoints(b) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// RENDER HELPERS
+// RENDER LAYER
 // ─────────────────────────────────────────────────────────────
 const NS = "http://www.w3.org/2000/svg";
 function el(tag, attrs) {
@@ -287,9 +294,6 @@ function makeHandles(b) {
   return group;
 }
 
-// ─────────────────────────────────────────────────────────────
-// MAIN RENDER LOOP
-// ─────────────────────────────────────────────────────────────
 function render() {
   svg.innerHTML = "";
 
@@ -369,6 +373,8 @@ function renderSidePanel() {
   if (STATE.buildings.length === 0) { bldListEl.innerHTML = '<div class="empty-list">No shapes yet.</div>'; return; }
   
   STATE.buildings.forEach(b => {
+    const pts = shapePoints(b);
+    const inside = pts.every(p => pointInPolygon(p[0], p[1], STATE.boundary.points));
     const row = document.createElement("div");
     row.className = "bld-row" + (selected && selected.type === "building" && selected.id === b.id ? " selected" : "");
     row.addEventListener("pointerdown", () => {
@@ -402,7 +408,8 @@ function renderSidePanel() {
     
     top.appendChild(cp); top.appendChild(ni); top.appendChild(dupBtn); top.appendChild(delBtn);
     const meta = document.createElement("div"); meta.className = "meta";
-    meta.innerHTML = `${BUILDING_SHAPES[b.shape].label} &middot; ${b.r||0}&deg; rotation`;
+    meta.innerHTML = `${BUILDING_SHAPES[b.shape].label} &middot; ${b.r||0}&deg; rotation` + 
+      (inside ? "" : ' &middot; <span class="warn-badge">outside boundary</span>');
     row.appendChild(top); row.appendChild(meta); bldListEl.appendChild(row);
   });
 }
@@ -418,7 +425,7 @@ function syncToPython() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// INTERACTION & INFINITE PAN/ZOOM CONTROL
+// INTERACTION CONTROLS
 // ─────────────────────────────────────────────────────────────
 parentElement.querySelector("#snapGrid").addEventListener("change", e => { SNAP = e.target.checked ? 5 : 1; });
 parentElement.querySelector("#clearBtn").addEventListener("click", () => {
@@ -430,7 +437,9 @@ svg.addEventListener("wheel", e => {
   const zoomFactor = e.deltaY > 0 ? 1.08 : 0.92;
   
   const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
-  const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+  const ctm = svg.getScreenCTM();
+  if (!ctm) return;
+  const p = pt.matrixTransform(ctm.inverse());
   
   const targetW = clamp(viewW * zoomFactor, 30, 900);
   const targetH = targetW * (WORLD_H / WORLD_W);
@@ -462,9 +471,8 @@ parentElement.querySelectorAll(".shape-btn[data-shape]").forEach(btn => {
 svg.addEventListener("dragover", e => e.preventDefault());
 svg.addEventListener("drop", e => {
   e.preventDefault(); const shape = e.dataTransfer.getData("text"); if (!BUILDING_SHAPES[shape]) return;
-  const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
-  const p = pt.matrixTransform(svg.getScreenCTM().inverse());
-  addBuilding(shape, p.x, p.y);
+  const [wx, wy] = screenToWorld(e.clientX, e.clientY);
+  addBuilding(shape, wx, wy);
 });
 
 const bSel = parentElement.querySelector("#boundarySelect");
@@ -482,8 +490,7 @@ bSides.addEventListener("change", () => {
 
 svg.addEventListener("pointerdown", e => {
   const target = e.target.closest("[data-role]");
-  const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
-  const p = pt.matrixTransform(svg.getScreenCTM().inverse());
+  const [wx, wy] = screenToWorld(e.clientX, e.clientY);
 
   if (!target || target.getAttribute("data-role") === "bg") {
     selected = null;
@@ -499,7 +506,10 @@ svg.addEventListener("pointerdown", e => {
     } else {
       const obj = STATE.buildings.find(b => String(b.id) === target.getAttribute("data-id")); if (!obj) return;
       if (tType === "rotate") drag = { mode: "rotate", obj };
-      else drag = { mode: "resize", obj, isCircle: obj.shape==="circle", ctm: target.closest('g').getScreenCTM().inverse() };
+      else {
+        const ctm = target.closest('g') ? target.closest('g').getScreenCTM() : svg.getScreenCTM();
+        drag = { mode: "resize", obj, isCircle: obj.shape==="circle", ctm: ctm ? ctm.inverse() : null };
+      }
     }
     svg.setPointerCapture(e.pointerId); return;
   }
@@ -508,7 +518,7 @@ svg.addEventListener("pointerdown", e => {
     const id = Number(target.getAttribute("data-id")); const b = STATE.buildings.find(x => x.id === id); if (!b) return;
     STATE.buildings = STATE.buildings.filter(x => x.id !== id); STATE.buildings.push(b);
     selected = { type: "building", id };
-    drag = { mode: "move", obj: b, offX: p.x - b.x, offY: p.y - b.y };
+    drag = { mode: "move", obj: b, offX: wx - b.x, offY: wy - b.y };
     svg.setPointerCapture(e.pointerId); render(); return;
   }
   if (role === "boundary") { selected = { type: "boundary" }; render(); }
@@ -525,9 +535,8 @@ svg.addEventListener("pointermove", e => {
     updateViewBox(); return;
   }
 
-  const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
-  const p = pt.matrixTransform(svg.getScreenCTM().inverse());
-  const wx = p.x, wy = p.y, obj = drag.obj;
+  const [wx, wy] = screenToWorld(e.clientX, e.clientY);
+  const obj = drag.obj;
 
   if (drag.mode === "vertex") {
     STATE.boundary.points[drag.index] = [snap(wx), snap(wy)];
@@ -538,7 +547,8 @@ svg.addEventListener("pointermove", e => {
     let deg = (Math.atan2(wy - cy, wx - cx) * 180 / Math.PI) + 90;
     deg = e.shiftKey ? Math.round(deg/15)*15 : Math.round(deg/5)*5;
     obj.r = (deg % 360 + 360) % 360;
-  } else if (drag.mode === "resize") {
+  } else if (drag.mode === "resize" && drag.ctm) {
+    const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
     const localP = pt.matrixTransform(drag.ctm);
     const cx = obj.x + obj.w/2, cy = obj.y + obj.h/2;
     if (drag.isCircle) {
@@ -588,7 +598,7 @@ def site_canvas(initial_state: dict, version: int):
         data=initial_state,
         default={"layout": initial_state},
         key=f"canvas-{version}",
-        height=800,
+        height=780,
         on_layout_change=lambda: None,
     )
 
