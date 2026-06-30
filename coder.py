@@ -674,4 +674,21 @@ if result is not None and result.get("layout") is not None:
 with st.sidebar:
     st.divider()
     st.download_button(
-        "
+        "💾 Download layout",
+        data=json.dumps(st.session_state.site_state, indent=2),
+        file_name="site_layout.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+
+state = st.session_state.site_state
+site_area = state.get("site_area")
+built_area = state.get("built_area")
+util_pct = state.get("utilization_pct")
+
+if site_area is not None:
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Site area", f"{site_area:.0f} m²")
+    c2.metric("Built area", f"{built_area:.0f} m²")
+    c3.metric("Utilisation", f"{util_pct:.1f}%")
+    c4.metric("Buildings", f"{len(state.get('buildings', []))}")
